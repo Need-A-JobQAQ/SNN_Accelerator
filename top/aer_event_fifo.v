@@ -14,6 +14,7 @@ module aer_event_fifo #(
     output wire [P_ADDR_WIDTH-1:0] o_event_addr,
     output wire o_empty,
     output wire o_full,
+    output wire [$clog2(P_FIFO_DEPTH + 1)-1:0] o_count,
     output reg o_overflow
 );
 
@@ -36,6 +37,7 @@ module aer_event_fifo #(
 
     assign o_empty = (fifo_count_reg == {LP_COUNT_WIDTH{1'b0}});
     assign o_full = (fifo_count_reg == LP_FIFO_DEPTH_VALUE);
+    assign o_count = fifo_count_reg;
     assign o_event_valid = !o_empty;
     assign o_event_addr = fifo_mem[read_ptr_reg];
 

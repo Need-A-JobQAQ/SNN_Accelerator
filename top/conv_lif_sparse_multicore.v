@@ -10,7 +10,9 @@ module conv_lif_sparse_multicore #(
     parameter P_NEURON_VALUE_TOTAL_BITS = 26,
     parameter P_NEURON_VALUE_FRAC_BITS = 12,
     parameter P_SKIP_THRESHOLD_SHIFT = 5,
-    parameter P_CORE_EVENT_FIFO_DEPTH = 512
+    parameter P_CORE_EVENT_FIFO_DEPTH = 512,
+    parameter P_CORE_FIFO_COUNT_WIDTH = $clog2(P_CORE_EVENT_FIFO_DEPTH + 1),
+    parameter P_ARB_POLICY = 1
 ) (
     input wire clk,
     input wire rst_n,
@@ -26,6 +28,8 @@ module conv_lif_sparse_multicore #(
     output wire o_layer_ready,
     output wire [31:0] o_skip_count,
     output wire [31:0] o_update_count,
+    output wire [P_NUM_CORES-1:0][P_CORE_FIFO_COUNT_WIDTH-1:0] o_core_fifo_count,
+    output wire [P_NUM_CORES-1:0][P_CORE_FIFO_COUNT_WIDTH-1:0] o_core_fifo_max_count,
     output wire o_core_fifo_overflow
 );
 
@@ -48,6 +52,7 @@ module conv_lif_sparse_multicore #(
     wire [P_NUM_CORES-1:0][LP_ADDR_WIDTH-1:0] fifo_event_addr_w;
     wire [P_NUM_CORES-1:0] fifo_empty_w;
     wire [P_NUM_CORES-1:0] fifo_full_w;
+    wire [P_NUM_CORES-1:0][P_CORE_FIFO_COUNT_WIDTH-1:0] fifo_count_w;
     wire [P_NUM_CORES-1:0] fifo_overflow_w;
     wire [P_NUM_CORES-1:0] arbiter_ready_w;
 
@@ -57,6 +62,7 @@ module conv_lif_sparse_multicore #(
     wire frame_complete_w;
 
     reg frame_done_pending_reg;
+    reg [P_NUM_CORES-1:0][P_CORE_FIFO_COUNT_WIDTH-1:0] core_fifo_max_count_reg;
 
     genvar core_idx;
     genvar spike_idx;
@@ -66,6 +72,8 @@ module conv_lif_sparse_multicore #(
     assign all_fifos_empty_w = &fifo_empty_w;
     assign frame_complete_w = frame_done_pending_reg && all_fifos_empty_w;
     assign o_layer_ready = all_cores_ready_w;
+    assign o_core_fifo_count = fifo_count_w;
+    assign o_core_fifo_max_count = core_fifo_max_count_reg;
     assign o_core_fifo_overflow = |fifo_overflow_w;
 
     /*
@@ -120,6 +128,7 @@ module conv_lif_sparse_multicore #(
                 .o_event_addr           (fifo_event_addr_w[core_idx]),
                 .o_empty                (fifo_empty_w[core_idx]),
                 .o_full                 (fifo_full_w[core_idx]),
+                .o_count                (fifo_count_w[core_idx]),
                 .o_overflow             (fifo_overflow_w[core_idx])
             );
         end
@@ -129,18 +138,39 @@ module conv_lif_sparse_multicore #(
 
     aer_event_arbiter #(
         .P_NUM_PORTS     (P_NUM_CORES),
-        .P_ADDR_WIDTH    (LP_ADDR_WIDTH)
+        .P_ADDR_WIDTH    (LP_ADDR_WIDTH),
+        .P_COUNT_WIDTH   (P_CORE_FIFO_COUNT_WIDTH),
+        .P_ARB_POLICY    (P_ARB_POLICY)
     ) u_event_arbiter (
         .clk             (clk),
         .rst_n           (rst_n),
         .i_clear         (i_enable_layer),
         .i_event_valid   (fifo_event_valid_w),
         .i_event_addr    (fifo_event_addr_w),
+        .i_event_count   (fifo_count_w),
         .o_event_ready   (arbiter_ready_w),
         .o_event_valid   (o_event_valid),
         .o_event_addr    (o_event_addr),
         .i_event_ready   (1'b1)
     );
+
+    /*
+     * 记录每个 core 本地 FIFO 在当前时间步内达到过的最高水位。
+     * 新时间步启动时清零，后续只在当前水位更高时更新。
+     */
+    generate
+        for (core_idx = 0; core_idx < P_NUM_CORES; core_idx = core_idx + 1) begin : gen_fifo_max_counter
+            always @(posedge clk or negedge rst_n) begin
+                if (!rst_n) begin
+                    core_fifo_max_count_reg[core_idx] <= {P_CORE_FIFO_COUNT_WIDTH{1'b0}};
+                end else if (i_enable_layer) begin
+                    core_fifo_max_count_reg[core_idx] <= {P_CORE_FIFO_COUNT_WIDTH{1'b0}};
+                end else if (fifo_count_w[core_idx] > core_fifo_max_count_reg[core_idx]) begin
+                    core_fifo_max_count_reg[core_idx] <= fifo_count_w[core_idx];
+                end
+            end
+        end
+    endgenerate
 
     /*
      * 所有 core 完成且各自事件 FIFO 清空后，才认为本时间步 AER 帧结束。

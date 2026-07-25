@@ -29,6 +29,12 @@ module conv_lif_aer_tb();
     localparam P_WEIGHT_BRAM_DATA_WIDTH = 64            ;//added for aer_linear module
     localparam P_WEIGHT_BRAM_EFFECTIVE_DEPTH = 392      ;//
     localparam P_NUM_OUTPUT_NEURONS = 10                ;//
+    localparam P_USE_MULTICORE_CONV_LIF = 0             ;// 1: 使用多 core 稀疏卷积 LIF
+    localparam P_NUM_CONV_LIF_CORES = 4                 ;// 多 core 版本的 core 数量
+    localparam P_CORE_EVENT_FIFO_DEPTH = 512            ;// 每个 core 本地 AER FIFO 深度
+    localparam P_CORE_FIFO_COUNT_WIDTH = $clog2(P_CORE_EVENT_FIFO_DEPTH + 1);
+    localparam P_FORCE_MULTICORE_CONV_LIF = 1           ;// 本 TB 强制启用多 core 路径，便于观察 FIFO 峰值水位
+    localparam P_AER_ARB_POLICY = 1                     ;// 0:固定优先级 1:轮询 2:FIFO负载感知
     localparam P_USE_SPARSE_CONV_LIF = 0                ;// 1: 使用稀疏跳过卷积 LIF；0: 使用原始卷积 LIF
     localparam P_USE_STATIC_MASK = 0                    ;// 1: 使用静态 mask AER 全连接；0: 使用原始 AER 全连接
     
@@ -47,10 +53,14 @@ module conv_lif_aer_tb();
     wire w_conv_lif_layer_ready                         ;
     wire [31:0] w_conv_lif_skip_count                   ;
     wire [31:0] w_conv_lif_update_count                 ;
+    wire [P_NUM_CONV_LIF_CORES-1:0][P_CORE_FIFO_COUNT_WIDTH-1:0] w_conv_lif_core_fifo_count;
+    wire [P_NUM_CONV_LIF_CORES-1:0][P_CORE_FIFO_COUNT_WIDTH-1:0] w_conv_lif_core_fifo_max_count;
+    wire w_conv_lif_core_fifo_overflow                  ;
     wire w_fifo_event_valid                             ;
     wire [LP_CONV_AER_ADDR_WIDTH-1:0] w_fifo_event_addr ;
     wire w_fifo_empty                                   ;
     wire w_fifo_full                                    ;
+    wire [$clog2(64 + 1)-1:0] w_fifo_count              ;
     wire w_fifo_overflow                                ;
     wire w_aer_event_frame_done                         ;
 
@@ -110,6 +120,41 @@ module conv_lif_aer_tb();
      * P_USE_SPARSE_CONV_LIF=1 使用感受野/active bit 稀疏跳过版本。
      */
     generate
+        if (P_FORCE_MULTICORE_CONV_LIF) begin : gen_multicore_conv_lif
+            conv_lif_sparse_multicore #(
+                .P_NUM_NEURONS                   (P_NUM_NEURONS),
+                .P_NUM_CORES                     (P_NUM_CONV_LIF_CORES),
+                .P_CORE_NUM_NEURONS              (P_NUM_NEURONS / P_NUM_CONV_LIF_CORES),
+                .P_NUM_INPUT_PIXELS              (P_NUM_INPUT_PIXELS),
+                .P_INPUT_HEIGHT                  (P_INPUT_HEIGHT),
+                .P_INPUT_WIDTH                   (P_INPUT_WIDTH),
+                .P_KERNEL_SIZE                   (P_KERNEL_SIZE),
+                .P_PADDING                       (P_PADDING),
+                .P_NEURON_VALUE_TOTAL_BITS       (P_NEURON_VALUE_TOTAL_BITS),
+                .P_NEURON_VALUE_FRAC_BITS        (P_NEURON_VALUE_FRAC_BITS),
+                .P_SKIP_THRESHOLD_SHIFT          (5),
+                .P_CORE_EVENT_FIFO_DEPTH         (P_CORE_EVENT_FIFO_DEPTH),
+                .P_CORE_FIFO_COUNT_WIDTH         (P_CORE_FIFO_COUNT_WIDTH),
+                .P_ARB_POLICY                    (P_AER_ARB_POLICY)
+            ) conv_lif_sparse_multicore_inst (
+                .clk                             (tb_clk),
+                .rst_n                           (tb_rst_n),
+                .i_enable_layer                  (r_enable_layer),
+                .i_input_spike_vector            (tb_input_spike_vector),
+                .i_all_currents_I                (w_all_currents_I),
+                .o_all_spikes_out                (w_all_spikes_out),
+                .o_all_spikes_valid              (w_all_spikes_valid),
+                .o_event_valid                   (w_conv_lif_event_valid),
+                .o_event_addr                    (w_conv_lif_event_addr),
+                .o_event_frame_done              (w_conv_lif_event_frame_done),
+                .o_layer_ready                   (w_conv_lif_layer_ready),
+                .o_skip_count                    (w_conv_lif_skip_count),
+                .o_update_count                  (w_conv_lif_update_count),
+                .o_core_fifo_count               (w_conv_lif_core_fifo_count),
+                .o_core_fifo_max_count           (w_conv_lif_core_fifo_max_count),
+                .o_core_fifo_overflow            (w_conv_lif_core_fifo_overflow)
+            );
+        end else
         if (P_USE_SPARSE_CONV_LIF) begin : gen_sparse_conv_lif
             conv_lif_layer_sparse #(
                 .P_NUM_NEURONS                   (P_NUM_NEURONS),
@@ -136,6 +181,9 @@ module conv_lif_aer_tb();
                 .o_skip_count                    (w_conv_lif_skip_count),
                 .o_update_count                  (w_conv_lif_update_count)
             );
+            assign w_conv_lif_core_fifo_count = {P_NUM_CONV_LIF_CORES * P_CORE_FIFO_COUNT_WIDTH{1'b0}};
+            assign w_conv_lif_core_fifo_max_count = {P_NUM_CONV_LIF_CORES * P_CORE_FIFO_COUNT_WIDTH{1'b0}};
+            assign w_conv_lif_core_fifo_overflow = 1'b0;
         end else begin : gen_dense_conv_lif
             conv_lif_layer #(
                 .P_NUM_NEURONS                   (P_NUM_NEURONS),
@@ -156,6 +204,9 @@ module conv_lif_aer_tb();
 
             assign w_conv_lif_skip_count = 32'd0;
             assign w_conv_lif_update_count = w_all_spikes_valid ? P_NUM_NEURONS : 32'd0;
+            assign w_conv_lif_core_fifo_count = {P_NUM_CONV_LIF_CORES * P_CORE_FIFO_COUNT_WIDTH{1'b0}};
+            assign w_conv_lif_core_fifo_max_count = {P_NUM_CONV_LIF_CORES * P_CORE_FIFO_COUNT_WIDTH{1'b0}};
+            assign w_conv_lif_core_fifo_overflow = 1'b0;
         end
     endgenerate
     
@@ -174,6 +225,7 @@ module conv_lif_aer_tb();
         .o_event_addr           (w_fifo_event_addr),
         .o_empty                (w_fifo_empty),
         .o_full                 (w_fifo_full),
+        .o_count                (w_fifo_count),
         .o_overflow             (w_fifo_overflow)
     );
 
@@ -256,7 +308,9 @@ module conv_lif_aer_tb();
 
     initial begin
         $display("[%0t ns] SIM_INFO: snn_top_tb simulation START!!!", $time);
-        if (P_USE_SPARSE_CONV_LIF) begin
+        if (P_FORCE_MULTICORE_CONV_LIF) begin
+            $display("[%0t ns] SIM_INFO: conv_lif mode = MULTICORE SPARSE, arb_policy=%0d.", $time, P_AER_ARB_POLICY);
+        end else if (P_USE_SPARSE_CONV_LIF) begin
             $display("[%0t ns] SIM_INFO: conv_lif mode = SPARSE SKIP.", $time);
         end else begin
             $display("[%0t ns] SIM_INFO: conv_lif mode = DENSE UPDATE.", $time);
@@ -316,8 +370,12 @@ module conv_lif_aer_tb();
 
         @(posedge tb_neuron_currents_valid);
         $display("[%0t ns] SIM_INFO: simulation DONE!!!.", $time);
-        $display("SIM_INFO: conv_lif_skip=%0d, conv_lif_update=%0d, fifo_overflow=%b",
-                 w_conv_lif_skip_count, w_conv_lif_update_count, w_fifo_overflow);
+        $display("SIM_INFO: conv_lif_skip=%0d, conv_lif_update=%0d, core_fifo_overflow=%b, out_fifo_overflow=%b",
+                 w_conv_lif_skip_count, w_conv_lif_update_count,
+                 w_conv_lif_core_fifo_overflow, w_fifo_overflow);
+        $display("SIM_INFO: core_fifo_max_count={%0d,%0d,%0d,%0d}",
+                 w_conv_lif_core_fifo_max_count[3], w_conv_lif_core_fifo_max_count[2],
+                 w_conv_lif_core_fifo_max_count[1], w_conv_lif_core_fifo_max_count[0]);
         #50;
         $finish;
 

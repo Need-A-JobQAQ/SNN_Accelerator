@@ -22,7 +22,8 @@ module snn_top #(
         {P_CONV_KERNEL_SIZE * P_CONV_KERNEL_SIZE * P_WEIGHT_BIT_WIDTH{1'b0}},
     parameter P_USE_MASKED_FC = 0,
     parameter P_USE_SPARSE_CONV_LIF = 0,
-    parameter P_USE_MULTICORE_CONV_LIF = 0
+    parameter P_USE_MULTICORE_CONV_LIF = 0,
+    parameter P_AER_ARB_POLICY = 1
 ) (
     input wire clk,
     input wire rst_n,
@@ -38,6 +39,7 @@ module snn_top #(
     output reg [31:0] o_perf_last_conv_lif_update_count,
     output reg [31:0] o_perf_total_conv_lif_skip_count,
     output reg [31:0] o_perf_total_conv_lif_update_count,
+    output reg [31:0] o_perf_last_core_fifo_max_count,
     output reg o_perf_early_stop,
     output wire o_perf_valid
 );
@@ -45,6 +47,7 @@ module snn_top #(
     localparam LP_NUM_CONV_FEATURES = P_CONV_OUT_CHANNELS * P_NUM_INPUT_PIXELS;
     localparam LP_CONV_AER_ADDR_WIDTH = $clog2(LP_NUM_CONV_FEATURES);
     localparam [31:0] LP_NUM_CONV_FEATURES_32 = LP_NUM_CONV_FEATURES;
+    localparam LP_CORE_FIFO_COUNT_WIDTH = $clog2(512 + 1);
 
     wire [$clog2(P_T_MAX)-1:0] cu_current_time_step_t;
     wire cu_poisson_encoder_en;
@@ -76,11 +79,15 @@ module snn_top #(
     wire conv_lif_event_frame_done;
     wire [31:0] conv_lif_skip_count;
     wire [31:0] conv_lif_update_count;
+    wire [3:0][LP_CORE_FIFO_COUNT_WIDTH-1:0] conv_lif_core_fifo_count;
+    wire [3:0][LP_CORE_FIFO_COUNT_WIDTH-1:0] conv_lif_core_fifo_max_count;
+    wire [LP_CORE_FIFO_COUNT_WIDTH-1:0] conv_lif_core_fifo_max_count_w;
     wire conv_lif_core_fifo_overflow;
     wire fifo_event_valid;
     wire [LP_CONV_AER_ADDR_WIDTH-1:0] fifo_event_addr;
     wire fifo_empty;
     wire fifo_full;
+    wire [$clog2(2048 + 1)-1:0] fifo_count;
     wire fifo_overflow;
     wire aer_event_valid;
     wire [LP_CONV_AER_ADDR_WIDTH-1:0] aer_event_addr;
@@ -248,7 +255,8 @@ module snn_top #(
                 .P_NEURON_VALUE_TOTAL_BITS   (P_NEURON_VALUE_TOTAL_BITS),
                 .P_NEURON_VALUE_FRAC_BITS    (P_NEURON_VALUE_FRAC_BITS),
                 .P_SKIP_THRESHOLD_SHIFT      (5),
-                .P_CORE_EVENT_FIFO_DEPTH     (512)
+                .P_CORE_EVENT_FIFO_DEPTH     (512),
+                .P_ARB_POLICY                (P_AER_ARB_POLICY)
             ) u_conv_lif_sparse_multicore (
                 .clk                    (clk),
                 .rst_n                  (rst_n),
@@ -263,6 +271,8 @@ module snn_top #(
                 .o_layer_ready          (conv_lif_layer_ready),
                 .o_skip_count           (conv_lif_skip_count),
                 .o_update_count         (conv_lif_update_count),
+                .o_core_fifo_count      (conv_lif_core_fifo_count),
+                .o_core_fifo_max_count  (conv_lif_core_fifo_max_count),
                 .o_core_fifo_overflow   (conv_lif_core_fifo_overflow)
             );
         end else if (P_USE_SPARSE_CONV_LIF) begin : gen_sparse_conv_lif
@@ -293,6 +303,8 @@ module snn_top #(
             );
 
             assign conv_lif_core_fifo_overflow = 1'b0;
+            assign conv_lif_core_fifo_count = {4 * LP_CORE_FIFO_COUNT_WIDTH{1'b0}};
+            assign conv_lif_core_fifo_max_count = {4 * LP_CORE_FIFO_COUNT_WIDTH{1'b0}};
         end else begin : gen_dense_conv_lif
             conv_lif_layer #(
                 .P_NUM_NEURONS               (LP_NUM_CONV_FEATURES),
@@ -314,6 +326,8 @@ module snn_top #(
             assign conv_lif_skip_count = 32'd0;
             assign conv_lif_update_count = conv_lif_spikes_valid ? LP_NUM_CONV_FEATURES_32 : 32'd0;
             assign conv_lif_core_fifo_overflow = 1'b0;
+            assign conv_lif_core_fifo_count = {4 * LP_CORE_FIFO_COUNT_WIDTH{1'b0}};
+            assign conv_lif_core_fifo_max_count = {4 * LP_CORE_FIFO_COUNT_WIDTH{1'b0}};
         end
     endgenerate
 
@@ -331,6 +345,7 @@ module snn_top #(
         .o_event_addr           (fifo_event_addr),
         .o_empty                (fifo_empty),
         .o_full                 (fifo_full),
+        .o_count                (fifo_count),
         .o_overflow             (fifo_overflow)
     );
 
@@ -341,6 +356,14 @@ module snn_top #(
     assign aer_event_valid = fifo_event_valid;
     assign aer_event_addr = fifo_event_addr;
     assign aer_event_frame_done = conv_lif_event_frame_done_pending_r && fifo_empty;
+    assign conv_lif_core_fifo_max_count_w =
+        (conv_lif_core_fifo_max_count[0] >= conv_lif_core_fifo_max_count[1] &&
+         conv_lif_core_fifo_max_count[0] >= conv_lif_core_fifo_max_count[2] &&
+         conv_lif_core_fifo_max_count[0] >= conv_lif_core_fifo_max_count[3]) ? conv_lif_core_fifo_max_count[0] :
+        (conv_lif_core_fifo_max_count[1] >= conv_lif_core_fifo_max_count[2] &&
+         conv_lif_core_fifo_max_count[1] >= conv_lif_core_fifo_max_count[3]) ? conv_lif_core_fifo_max_count[1] :
+        (conv_lif_core_fifo_max_count[2] >= conv_lif_core_fifo_max_count[3]) ? conv_lif_core_fifo_max_count[2] :
+                                                                                conv_lif_core_fifo_max_count[3];
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -490,6 +513,7 @@ module snn_top #(
             o_perf_last_conv_lif_update_count <= 32'd0;
             o_perf_total_conv_lif_skip_count <= 32'd0;
             o_perf_total_conv_lif_update_count <= 32'd0;
+            o_perf_last_core_fifo_max_count <= 32'd0;
             o_perf_early_stop <= 1'b0;
         end else begin
             /*
@@ -505,6 +529,7 @@ module snn_top #(
                 o_perf_last_conv_lif_update_count <= 32'd0;
                 o_perf_total_conv_lif_skip_count <= 32'd0;
                 o_perf_total_conv_lif_update_count <= 32'd0;
+                o_perf_last_core_fifo_max_count <= 32'd0;
                 o_perf_early_stop <= 1'b0;
             end else if (cu_global_processing_done) begin
                 perf_processing_active_r <= 1'b0;
@@ -561,6 +586,7 @@ module snn_top #(
                 o_perf_last_conv_lif_update_count <= conv_lif_update_count;
                 o_perf_total_conv_lif_skip_count <= o_perf_total_conv_lif_skip_count + conv_lif_skip_count;
                 o_perf_total_conv_lif_update_count <= o_perf_total_conv_lif_update_count + conv_lif_update_count;
+                o_perf_last_core_fifo_max_count <= {{(32-LP_CORE_FIFO_COUNT_WIDTH){1'b0}}, conv_lif_core_fifo_max_count_w};
             end
         end
     end
