@@ -23,7 +23,8 @@ module snn_top #(
     parameter P_USE_MASKED_FC = 0,
     parameter P_USE_SPARSE_CONV_LIF = 0,
     parameter P_USE_MULTICORE_CONV_LIF = 0,
-    parameter P_AER_ARB_POLICY = 1
+    parameter P_AER_ARB_POLICY = 1,
+    parameter P_CONV_LIF_CORE_MAPPING_MODE = 0
 ) (
     input wire clk,
     input wire rst_n,
@@ -39,6 +40,7 @@ module snn_top #(
     output reg [31:0] o_perf_last_conv_lif_update_count,
     output reg [31:0] o_perf_total_conv_lif_skip_count,
     output reg [31:0] o_perf_total_conv_lif_update_count,
+    output reg [31:0] o_perf_last_core_event_max_count,
     output reg [31:0] o_perf_last_core_fifo_max_count,
     output reg o_perf_early_stop,
     output wire o_perf_valid
@@ -79,6 +81,8 @@ module snn_top #(
     wire conv_lif_event_frame_done;
     wire [31:0] conv_lif_skip_count;
     wire [31:0] conv_lif_update_count;
+    wire [3:0][31:0] conv_lif_core_event_count;
+    wire [31:0] conv_lif_core_event_max_count_w;
     wire [3:0][LP_CORE_FIFO_COUNT_WIDTH-1:0] conv_lif_core_fifo_count;
     wire [3:0][LP_CORE_FIFO_COUNT_WIDTH-1:0] conv_lif_core_fifo_max_count;
     wire [LP_CORE_FIFO_COUNT_WIDTH-1:0] conv_lif_core_fifo_max_count_w;
@@ -252,6 +256,7 @@ module snn_top #(
                 .P_INPUT_WIDTH               (P_INPUT_WIDTH),
                 .P_KERNEL_SIZE               (P_CONV_KERNEL_SIZE),
                 .P_PADDING                   (P_CONV_PADDING),
+                .P_CORE_MAPPING_MODE         (P_CONV_LIF_CORE_MAPPING_MODE),
                 .P_NEURON_VALUE_TOTAL_BITS   (P_NEURON_VALUE_TOTAL_BITS),
                 .P_NEURON_VALUE_FRAC_BITS    (P_NEURON_VALUE_FRAC_BITS),
                 .P_SKIP_THRESHOLD_SHIFT      (5),
@@ -271,6 +276,7 @@ module snn_top #(
                 .o_layer_ready          (conv_lif_layer_ready),
                 .o_skip_count           (conv_lif_skip_count),
                 .o_update_count         (conv_lif_update_count),
+                .o_core_event_count     (conv_lif_core_event_count),
                 .o_core_fifo_count      (conv_lif_core_fifo_count),
                 .o_core_fifo_max_count  (conv_lif_core_fifo_max_count),
                 .o_core_fifo_overflow   (conv_lif_core_fifo_overflow)
@@ -303,6 +309,7 @@ module snn_top #(
             );
 
             assign conv_lif_core_fifo_overflow = 1'b0;
+            assign conv_lif_core_event_count = {4 * 32{1'b0}};
             assign conv_lif_core_fifo_count = {4 * LP_CORE_FIFO_COUNT_WIDTH{1'b0}};
             assign conv_lif_core_fifo_max_count = {4 * LP_CORE_FIFO_COUNT_WIDTH{1'b0}};
         end else begin : gen_dense_conv_lif
@@ -326,6 +333,7 @@ module snn_top #(
             assign conv_lif_skip_count = 32'd0;
             assign conv_lif_update_count = conv_lif_spikes_valid ? LP_NUM_CONV_FEATURES_32 : 32'd0;
             assign conv_lif_core_fifo_overflow = 1'b0;
+            assign conv_lif_core_event_count = {4 * 32{1'b0}};
             assign conv_lif_core_fifo_count = {4 * LP_CORE_FIFO_COUNT_WIDTH{1'b0}};
             assign conv_lif_core_fifo_max_count = {4 * LP_CORE_FIFO_COUNT_WIDTH{1'b0}};
         end
@@ -356,6 +364,14 @@ module snn_top #(
     assign aer_event_valid = fifo_event_valid;
     assign aer_event_addr = fifo_event_addr;
     assign aer_event_frame_done = conv_lif_event_frame_done_pending_r && fifo_empty;
+    assign conv_lif_core_event_max_count_w =
+        (conv_lif_core_event_count[0] >= conv_lif_core_event_count[1] &&
+         conv_lif_core_event_count[0] >= conv_lif_core_event_count[2] &&
+         conv_lif_core_event_count[0] >= conv_lif_core_event_count[3]) ? conv_lif_core_event_count[0] :
+        (conv_lif_core_event_count[1] >= conv_lif_core_event_count[2] &&
+         conv_lif_core_event_count[1] >= conv_lif_core_event_count[3]) ? conv_lif_core_event_count[1] :
+        (conv_lif_core_event_count[2] >= conv_lif_core_event_count[3]) ? conv_lif_core_event_count[2] :
+                                                                         conv_lif_core_event_count[3];
     assign conv_lif_core_fifo_max_count_w =
         (conv_lif_core_fifo_max_count[0] >= conv_lif_core_fifo_max_count[1] &&
          conv_lif_core_fifo_max_count[0] >= conv_lif_core_fifo_max_count[2] &&
@@ -513,6 +529,7 @@ module snn_top #(
             o_perf_last_conv_lif_update_count <= 32'd0;
             o_perf_total_conv_lif_skip_count <= 32'd0;
             o_perf_total_conv_lif_update_count <= 32'd0;
+            o_perf_last_core_event_max_count <= 32'd0;
             o_perf_last_core_fifo_max_count <= 32'd0;
             o_perf_early_stop <= 1'b0;
         end else begin
@@ -529,6 +546,7 @@ module snn_top #(
                 o_perf_last_conv_lif_update_count <= 32'd0;
                 o_perf_total_conv_lif_skip_count <= 32'd0;
                 o_perf_total_conv_lif_update_count <= 32'd0;
+                o_perf_last_core_event_max_count <= 32'd0;
                 o_perf_last_core_fifo_max_count <= 32'd0;
                 o_perf_early_stop <= 1'b0;
             end else if (cu_global_processing_done) begin
@@ -586,6 +604,7 @@ module snn_top #(
                 o_perf_last_conv_lif_update_count <= conv_lif_update_count;
                 o_perf_total_conv_lif_skip_count <= o_perf_total_conv_lif_skip_count + conv_lif_skip_count;
                 o_perf_total_conv_lif_update_count <= o_perf_total_conv_lif_update_count + conv_lif_update_count;
+                o_perf_last_core_event_max_count <= conv_lif_core_event_max_count_w;
                 o_perf_last_core_fifo_max_count <= {{(32-LP_CORE_FIFO_COUNT_WIDTH){1'b0}}, conv_lif_core_fifo_max_count_w};
             end
         end

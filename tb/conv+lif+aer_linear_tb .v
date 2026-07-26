@@ -33,6 +33,7 @@ module conv_lif_aer_tb();
     localparam P_NUM_CONV_LIF_CORES = 4                 ;// 多 core 版本的 core 数量
     localparam P_CORE_EVENT_FIFO_DEPTH = 512            ;// 每个 core 本地 AER FIFO 深度
     localparam P_CORE_FIFO_COUNT_WIDTH = $clog2(P_CORE_EVENT_FIFO_DEPTH + 1);
+    localparam P_CORE_MAPPING_MODE = 0                  ;// 0: 连续地址划分，1: 2x2相位交错，2: 7x7 tile交错
     localparam P_FORCE_MULTICORE_CONV_LIF = 1           ;// 本 TB 强制启用多 core 路径，便于观察 FIFO 峰值水位
     localparam P_AER_ARB_POLICY = 1                     ;// 0:固定优先级 1:轮询 2:FIFO负载感知
     localparam P_USE_SPARSE_CONV_LIF = 0                ;// 1: 使用稀疏跳过卷积 LIF；0: 使用原始卷积 LIF
@@ -53,6 +54,7 @@ module conv_lif_aer_tb();
     wire w_conv_lif_layer_ready                         ;
     wire [31:0] w_conv_lif_skip_count                   ;
     wire [31:0] w_conv_lif_update_count                 ;
+    wire [P_NUM_CONV_LIF_CORES-1:0][31:0] w_conv_lif_core_event_count;
     wire [P_NUM_CONV_LIF_CORES-1:0][P_CORE_FIFO_COUNT_WIDTH-1:0] w_conv_lif_core_fifo_count;
     wire [P_NUM_CONV_LIF_CORES-1:0][P_CORE_FIFO_COUNT_WIDTH-1:0] w_conv_lif_core_fifo_max_count;
     wire w_conv_lif_core_fifo_overflow                  ;
@@ -130,6 +132,7 @@ module conv_lif_aer_tb();
                 .P_INPUT_WIDTH                   (P_INPUT_WIDTH),
                 .P_KERNEL_SIZE                   (P_KERNEL_SIZE),
                 .P_PADDING                       (P_PADDING),
+                .P_CORE_MAPPING_MODE             (P_CORE_MAPPING_MODE),
                 .P_NEURON_VALUE_TOTAL_BITS       (P_NEURON_VALUE_TOTAL_BITS),
                 .P_NEURON_VALUE_FRAC_BITS        (P_NEURON_VALUE_FRAC_BITS),
                 .P_SKIP_THRESHOLD_SHIFT          (5),
@@ -150,6 +153,7 @@ module conv_lif_aer_tb();
                 .o_layer_ready                   (w_conv_lif_layer_ready),
                 .o_skip_count                    (w_conv_lif_skip_count),
                 .o_update_count                  (w_conv_lif_update_count),
+                .o_core_event_count              (w_conv_lif_core_event_count),
                 .o_core_fifo_count               (w_conv_lif_core_fifo_count),
                 .o_core_fifo_max_count           (w_conv_lif_core_fifo_max_count),
                 .o_core_fifo_overflow            (w_conv_lif_core_fifo_overflow)
@@ -181,6 +185,7 @@ module conv_lif_aer_tb();
                 .o_skip_count                    (w_conv_lif_skip_count),
                 .o_update_count                  (w_conv_lif_update_count)
             );
+            assign w_conv_lif_core_event_count = {P_NUM_CONV_LIF_CORES * 32{1'b0}};
             assign w_conv_lif_core_fifo_count = {P_NUM_CONV_LIF_CORES * P_CORE_FIFO_COUNT_WIDTH{1'b0}};
             assign w_conv_lif_core_fifo_max_count = {P_NUM_CONV_LIF_CORES * P_CORE_FIFO_COUNT_WIDTH{1'b0}};
             assign w_conv_lif_core_fifo_overflow = 1'b0;
@@ -204,6 +209,7 @@ module conv_lif_aer_tb();
 
             assign w_conv_lif_skip_count = 32'd0;
             assign w_conv_lif_update_count = w_all_spikes_valid ? P_NUM_NEURONS : 32'd0;
+            assign w_conv_lif_core_event_count = {P_NUM_CONV_LIF_CORES * 32{1'b0}};
             assign w_conv_lif_core_fifo_count = {P_NUM_CONV_LIF_CORES * P_CORE_FIFO_COUNT_WIDTH{1'b0}};
             assign w_conv_lif_core_fifo_max_count = {P_NUM_CONV_LIF_CORES * P_CORE_FIFO_COUNT_WIDTH{1'b0}};
             assign w_conv_lif_core_fifo_overflow = 1'b0;
@@ -373,6 +379,9 @@ module conv_lif_aer_tb();
         $display("SIM_INFO: conv_lif_skip=%0d, conv_lif_update=%0d, core_fifo_overflow=%b, out_fifo_overflow=%b",
                  w_conv_lif_skip_count, w_conv_lif_update_count,
                  w_conv_lif_core_fifo_overflow, w_fifo_overflow);
+        $display("SIM_INFO: core_event_count={%0d,%0d,%0d,%0d}",
+                 w_conv_lif_core_event_count[3], w_conv_lif_core_event_count[2],
+                 w_conv_lif_core_event_count[1], w_conv_lif_core_event_count[0]);
         $display("SIM_INFO: core_fifo_max_count={%0d,%0d,%0d,%0d}",
                  w_conv_lif_core_fifo_max_count[3], w_conv_lif_core_fifo_max_count[2],
                  w_conv_lif_core_fifo_max_count[1], w_conv_lif_core_fifo_max_count[0]);
