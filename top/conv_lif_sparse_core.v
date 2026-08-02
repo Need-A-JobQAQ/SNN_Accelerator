@@ -7,8 +7,6 @@ module conv_lif_sparse_core #(
     parameter P_INPUT_WIDTH = 28,
     parameter P_KERNEL_SIZE = 3,
     parameter P_PADDING = 1,
-    parameter P_CORE_ID = 0,
-    parameter P_CORE_MAPPING_MODE = 0,
     parameter P_NEURON_VALUE_TOTAL_BITS = 26,
     parameter P_NEURON_VALUE_FRAC_BITS = 12,
     parameter P_SKIP_THRESHOLD_SHIFT = 5
@@ -100,14 +98,14 @@ module conv_lif_sparse_core #(
     assign scan_addr_valid_w = (current_state_reg == S_PROCESSING) &&
                                (issued_addr_count_reg < P_CORE_NUM_NEURONS);
     assign scan_local_addr_w = issued_addr_count_reg[LP_LOCAL_ADDR_WIDTH-1:0];
-    assign scan_global_addr_w = local_to_global_addr(scan_local_addr_w);
+    assign scan_global_addr_w = P_CORE_START_ADDR + scan_local_addr_w;
     assign scan_rf_active_w = receptive_field_active(latched_input_spikes_reg, scan_global_addr_w);
     assign scan_state_active_w = active_state_bitmap_reg[scan_local_addr_w];
     assign scan_need_update_w = scan_addr_valid_w && (scan_rf_active_w || scan_state_active_w);
 
     assign pipeline_busy_w = pipeline_busy_comb;
     assign process_local_addr_w = addr_pipeline_reg[BRAM_READ_LATENCY-1];
-    assign process_global_addr_w = local_to_global_addr(process_local_addr_w);
+    assign process_global_addr_w = P_CORE_START_ADDR + process_local_addr_w;
     assign clear_membrane_en_w = (current_state_reg == S_CLEAR);
     assign membrane_ram_write_en_w = clear_membrane_en_w || lif_membrane_write_en_w;
     assign membrane_ram_write_addr_w = clear_membrane_en_w ? clear_addr_reg : process_local_addr_w;
@@ -173,79 +171,6 @@ module conv_lif_sparse_core #(
                         receptive_field_active = 1'b1;
                     end
                 end
-            end
-        end
-    endfunction
-
-    /*
-     * core 本地地址到全局神经元地址的映射。
-     * mode 0：连续地址划分，保持原来的 core0/core1/core2/core3 连续分段方式。
-     * mode 1：2x2 空间块交错划分，按(row[0], col[0])把相邻空间位置分散到4个core。
-     * mode 2：7x7 tile 空间块交错划分，按(tile_row + tile_col) % 4分配tile。
-     */
-    function [LP_GLOBAL_ADDR_WIDTH-1:0] local_to_global_addr;
-        input [LP_LOCAL_ADDR_WIDTH-1:0] local_addr;
-        integer positions_per_core;
-        integer tile_size;
-        integer tile_pixels;
-        integer tile_cols;
-        integer local_channel;
-        integer local_spatial_idx;
-        integer local_tile_idx;
-        integer in_tile_idx;
-        integer local_row;
-        integer local_col;
-        integer tile_row;
-        integer tile_col;
-        integer in_tile_row;
-        integer in_tile_col;
-        integer global_row;
-        integer global_col;
-        integer global_spatial_idx;
-        integer global_local_addr;
-        begin
-            if (P_CORE_MAPPING_MODE == 1) begin
-                positions_per_core = (P_INPUT_HEIGHT / 2) * (P_INPUT_WIDTH / 2);
-                local_channel = local_addr / positions_per_core;
-                local_spatial_idx = local_addr % positions_per_core;
-                local_row = local_spatial_idx / (P_INPUT_WIDTH / 2);
-                local_col = local_spatial_idx % (P_INPUT_WIDTH / 2);
-                global_row = (local_row * 2) + (P_CORE_ID / 2);
-                global_col = (local_col * 2) + (P_CORE_ID % 2);
-                global_spatial_idx = (global_row * P_INPUT_WIDTH) + global_col;
-                global_local_addr = P_NUM_INPUT_PIXELS - 1 - global_spatial_idx;
-                local_to_global_addr = (local_channel * P_NUM_INPUT_PIXELS) + global_local_addr;
-            end else if (P_CORE_MAPPING_MODE == 2) begin
-                /*
-                 * 7x7 tile映射：
-                 * 28x28特征图被切成4x4个tile，每个tile包含49个像素。
-                 * local_addr先拆成：通道号、core内部第几个tile、tile内部第几个像素。
-                 */
-                tile_size = 7;
-                tile_pixels = tile_size * tile_size;
-                tile_cols = P_INPUT_WIDTH / tile_size;
-                positions_per_core = P_CORE_NUM_NEURONS / (P_GLOBAL_NUM_NEURONS / P_NUM_INPUT_PIXELS);
-                local_channel = local_addr / positions_per_core;
-                local_spatial_idx = local_addr % positions_per_core;
-                local_tile_idx = local_spatial_idx / tile_pixels;
-                in_tile_idx = local_spatial_idx % tile_pixels;
-
-                /*
-                 * 每个core有4个tile。
-                 * 采用core_id = (tile_row + tile_col) % 4的反向映射：
-                 * local_tile_idx决定tile_row，core_id决定对应的tile_col。
-                 */
-                tile_row = local_tile_idx;
-                tile_col = (P_CORE_ID + tile_cols - tile_row) % tile_cols;
-                in_tile_row = in_tile_idx / tile_size;
-                in_tile_col = in_tile_idx % tile_size;
-                global_row = (tile_row * tile_size) + in_tile_row;
-                global_col = (tile_col * tile_size) + in_tile_col;
-                global_spatial_idx = (global_row * P_INPUT_WIDTH) + global_col;
-                global_local_addr = P_NUM_INPUT_PIXELS - 1 - global_spatial_idx;
-                local_to_global_addr = (local_channel * P_NUM_INPUT_PIXELS) + global_local_addr;
-            end else begin
-                local_to_global_addr = P_CORE_START_ADDR + local_addr;
             end
         end
     endfunction

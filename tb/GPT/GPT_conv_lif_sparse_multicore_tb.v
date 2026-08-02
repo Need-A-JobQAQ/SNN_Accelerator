@@ -10,7 +10,6 @@ module GPT_conv_lif_sparse_multicore_tb;
     localparam P_NUM_CORES = 4;
     localparam P_CORE_NUM_NEURONS = P_NUM_NEURONS / P_NUM_CORES;
     localparam P_ARB_POLICY = 2;
-    localparam P_CORE_MAPPING_MODE = 1;
     localparam P_NEURON_VALUE_TOTAL_BITS = 26;
     localparam P_NEURON_VALUE_FRAC_BITS = 12;
     localparam signed [P_NEURON_VALUE_TOTAL_BITS-1:0] ONE_FIXED =
@@ -39,7 +38,6 @@ module GPT_conv_lif_sparse_multicore_tb;
     wire multi_ready;
     wire [31:0] multi_skip_count;
     wire [31:0] multi_update_count;
-    wire [P_NUM_CORES-1:0][31:0] multi_core_event_count;
     wire [P_NUM_CORES-1:0][$clog2(16 + 1)-1:0] multi_core_fifo_count;
     wire [P_NUM_CORES-1:0][$clog2(16 + 1)-1:0] multi_core_fifo_max_count;
     wire multi_fifo_overflow;
@@ -88,7 +86,6 @@ module GPT_conv_lif_sparse_multicore_tb;
         .P_NEURON_VALUE_FRAC_BITS    (P_NEURON_VALUE_FRAC_BITS),
         .P_SKIP_THRESHOLD_SHIFT      (5),
         .P_CORE_EVENT_FIFO_DEPTH     (16),
-        .P_CORE_MAPPING_MODE         (P_CORE_MAPPING_MODE),
         .P_ARB_POLICY                (P_ARB_POLICY)
     ) u_multi_sparse (
         .clk                    (clk),
@@ -104,7 +101,6 @@ module GPT_conv_lif_sparse_multicore_tb;
         .o_layer_ready          (multi_ready),
         .o_skip_count           (multi_skip_count),
         .o_update_count         (multi_update_count),
-        .o_core_event_count     (multi_core_event_count),
         .o_core_fifo_count      (multi_core_fifo_count),
         .o_core_fifo_max_count  (multi_core_fifo_max_count),
         .o_core_fifo_overflow   (multi_fifo_overflow)
@@ -209,9 +205,6 @@ module GPT_conv_lif_sparse_multicore_tb;
 
         $display("SIM_PASS: conv_lif_sparse_multicore matches single sparse behavior.");
         $display("SIM_INFO: last skip=%0d update=%0d", multi_skip_count, multi_update_count);
-        $display("SIM_INFO: core_event_count={%0d,%0d,%0d,%0d}",
-                 multi_core_event_count[3], multi_core_event_count[2],
-                 multi_core_event_count[1], multi_core_event_count[0]);
         $display("SIM_INFO: core_fifo_max_count={%0d,%0d,%0d,%0d}",
                  multi_core_fifo_max_count[3], multi_core_fifo_max_count[2],
                  multi_core_fifo_max_count[1], multi_core_fifo_max_count[0]);
