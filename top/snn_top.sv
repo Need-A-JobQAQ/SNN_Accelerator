@@ -70,6 +70,12 @@ module snn_top #(
 
     wire signed [LP_NUM_CONV_FEATURES-1:0][P_NEURON_VALUE_TOTAL_BITS-1:0] conv_currents;
     wire conv_currents_valid;
+    wire conv_current_ram_ready;
+    wire conv_current_ram_rd_en;
+    wire [LP_CONV_AER_ADDR_WIDTH-1:0] conv_current_ram_rd_addr;
+    wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] conv_current_ram_rd_data;
+    wire conv_current_ram_rd_valid;
+    wire conv_lif_input_ready_w;
     wire [LP_NUM_CONV_FEATURES-1:0] conv_lif_output_spikes;
     wire conv_lif_spikes_valid;
     wire conv_lif_layer_ready;
@@ -94,6 +100,9 @@ module snn_top #(
     wire aer_event_frame_done;
     wire aer_event_ready;
     wire perf_aer_event_accept_w;
+
+    assign conv_lif_input_ready_w = (P_USE_SPARSE_CONV_LIF && !P_USE_MULTICORE_CONV_LIF) ?
+                                    conv_current_ram_ready : conv_currents_valid;
 
     wire signed [P_NUM_OUTPUT_NEURONS-1:0][P_NEURON_VALUE_TOTAL_BITS-1:0] neuron_currents;
     wire neuron_currents_valid;
@@ -203,6 +212,7 @@ module snn_top #(
         .P_PADDING                  (P_CONV_PADDING),
         .P_WEIGHT_BIT_WIDTH         (P_WEIGHT_BIT_WIDTH),
         .P_NEURON_VALUE_TOTAL_BITS  (P_NEURON_VALUE_TOTAL_BITS),
+        .P_ENABLE_COMPAT_READBACK  (!(P_USE_SPARSE_CONV_LIF && !P_USE_MULTICORE_CONV_LIF)),
         .P_CONV0_WEIGHTS_PACKED     (P_CONV0_WEIGHTS_PACKED),
         .P_CONV1_WEIGHTS_PACKED     (P_CONV1_WEIGHTS_PACKED)
     ) u_conv_layer_parallel (
@@ -210,6 +220,11 @@ module snn_top #(
         .rst_n                  (rst_n),
         .i_calc_start           (conv_layer_actual_start_r),
         .i_input_spike_vector   (encoded_spikes),
+        .i_current_rd_en       (conv_current_ram_rd_en),
+        .i_current_rd_addr     (conv_current_ram_rd_addr),
+        .o_current_rd_data     (conv_current_ram_rd_data),
+        .o_current_rd_valid    (conv_current_ram_rd_valid),
+        .o_current_ram_ready   (conv_current_ram_ready),
         .o_all_currents_I       (conv_currents),
         .o_all_currents_valid   (conv_currents_valid)
     );
@@ -221,7 +236,7 @@ module snn_top #(
         end else begin
             conv_lif_actual_enable_r <= 1'b0;
 
-            if (conv_currents_valid) begin
+            if (conv_lif_input_ready_w) begin
                 conv_lif_enable_pending_r <= 1'b1;
             end
 
@@ -275,6 +290,9 @@ module snn_top #(
                 .o_core_fifo_max_count  (conv_lif_core_fifo_max_count),
                 .o_core_fifo_overflow   (conv_lif_core_fifo_overflow)
             );
+
+            assign conv_current_ram_rd_en = 1'b0;
+            assign conv_current_ram_rd_addr = {LP_CONV_AER_ADDR_WIDTH{1'b0}};
         end else if (P_USE_SPARSE_CONV_LIF) begin : gen_sparse_conv_lif
             conv_lif_layer_sparse #(
                 .P_NUM_NEURONS               (LP_NUM_CONV_FEATURES),
@@ -292,6 +310,10 @@ module snn_top #(
                 .i_enable_layer         (conv_lif_actual_enable_r),
                 .i_input_spike_vector   (encoded_spikes),
                 .i_all_currents_I       (conv_currents),
+                .i_current_ram_rd_data  (conv_current_ram_rd_data),
+                .i_current_ram_rd_valid (conv_current_ram_rd_valid),
+                .o_current_ram_rd_en    (conv_current_ram_rd_en),
+                .o_current_ram_rd_addr  (conv_current_ram_rd_addr),
                 .o_all_spikes_out       (conv_lif_output_spikes),
                 .o_all_spikes_valid     (conv_lif_spikes_valid),
                 .o_event_valid          (conv_lif_event_valid),
@@ -328,9 +350,10 @@ module snn_top #(
             assign conv_lif_core_fifo_overflow = 1'b0;
             assign conv_lif_core_fifo_count = {4 * LP_CORE_FIFO_COUNT_WIDTH{1'b0}};
             assign conv_lif_core_fifo_max_count = {4 * LP_CORE_FIFO_COUNT_WIDTH{1'b0}};
+            assign conv_current_ram_rd_en = 1'b0;
+            assign conv_current_ram_rd_addr = {LP_CONV_AER_ADDR_WIDTH{1'b0}};
         end
     endgenerate
-
     aer_event_fifo #(
         .P_ADDR_WIDTH           (LP_CONV_AER_ADDR_WIDTH),
         .P_FIFO_DEPTH           (2048)
@@ -592,3 +615,4 @@ module snn_top #(
     end
 
 endmodule
+

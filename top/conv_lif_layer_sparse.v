@@ -14,7 +14,11 @@ module conv_lif_layer_sparse #(
     input wire i_enable_layer,
     input wire [P_NUM_INPUT_PIXELS-1:0] i_input_spike_vector,
     input wire signed [P_NUM_NEURONS-1:0][P_NEURON_VALUE_TOTAL_BITS-1:0] i_all_currents_I,
+    input wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] i_current_ram_rd_data,
+    input wire i_current_ram_rd_valid,
 
+    output wire o_current_ram_rd_en,
+    output wire [$clog2(P_NUM_NEURONS)-1:0] o_current_ram_rd_addr,
     output reg [P_NUM_NEURONS-1:0] o_all_spikes_out,
     output reg o_all_spikes_valid,
     output reg o_event_valid,
@@ -26,15 +30,9 @@ module conv_lif_layer_sparse #(
 );
 
     /*
-     * 稀疏版卷积 LIF 层。
-     *
-     * 原 conv_lif_layer 每个时间步都会访问 1568 个膜电位地址。
-     * 本模块增加两个判断：
-     * 1. 当前输出像素的 3x3 感受野内是否存在输入脉冲；
-     * 2. 该神经元上一轮更新后膜电位是否仍然处于 active 状态。
-     *
-     * 如果感受野无脉冲，并且 active bit 为 0，则认为该神经元接近静息，
-     * 本时间步跳过膜电位 RAM 读写和 LIF 更新。
+     * 稀疏卷积 LIF 层。
+     * 本模块仍然扫描所有神经元地址，但只有“感受野活跃”或“膜电位仍活跃”时才更新。
+     * 卷积电流不再由大数组输入，而是通过 current RAM 读口按需读取。
      */
     localparam LP_ADDR_WIDTH = $clog2(P_NUM_NEURONS);
     localparam LP_COUNT_WIDTH = $clog2(P_NUM_NEURONS + 1);
@@ -59,7 +57,6 @@ module conv_lif_layer_sparse #(
     reg [2:0] next_state_reg;
 
     reg [P_NUM_INPUT_PIXELS-1:0] latched_input_spikes_reg;
-    reg signed [P_NUM_NEURONS-1:0][P_NEURON_VALUE_TOTAL_BITS-1:0] latched_currents_reg;
     reg [P_NUM_NEURONS-1:0] active_state_bitmap_reg;
 
     reg [LP_ADDR_WIDTH-1:0] clear_addr_reg;
@@ -67,6 +64,7 @@ module conv_lif_layer_sparse #(
 
     reg [LP_ADDR_WIDTH-1:0] addr_pipeline_reg [BRAM_READ_LATENCY-1:0];
     reg valid_pipeline_reg [BRAM_READ_LATENCY-1:0];
+    reg current_valid_pipeline_reg [BRAM_READ_LATENCY-1:0];
     reg pipeline_busy_comb;
 
     wire scan_addr_valid_w;
@@ -74,6 +72,7 @@ module conv_lif_layer_sparse #(
     wire scan_rf_active_w;
     wire scan_state_active_w;
     wire scan_need_update_w;
+    wire scan_need_current_w;
     wire pipeline_busy_w;
 
     wire clear_membrane_en_w;
@@ -85,6 +84,7 @@ module conv_lif_layer_sparse #(
     wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] lif_membrane_write_data_w;
 
     wire [LP_ADDR_WIDTH-1:0] process_addr_w;
+    wire process_has_current_w;
     wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] process_input_current_w;
     wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] process_membrane_w;
     wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] process_diff_w;
@@ -95,7 +95,6 @@ module conv_lif_layer_sparse #(
     wire process_next_active_w;
     wire [LP_ADDR_WIDTH-1:0] process_event_addr_w;
 
-    integer current_reset_idx;
     integer pipe_idx;
     integer busy_idx;
 
@@ -105,10 +104,15 @@ module conv_lif_layer_sparse #(
     assign scan_addr_w = issued_addr_count_reg[LP_ADDR_WIDTH-1:0];
     assign scan_rf_active_w = receptive_field_active(latched_input_spikes_reg, scan_addr_w);
     assign scan_state_active_w = active_state_bitmap_reg[scan_addr_w];
+    assign scan_need_current_w = scan_addr_valid_w && scan_rf_active_w;
     assign scan_need_update_w = scan_addr_valid_w && (scan_rf_active_w || scan_state_active_w);
+
+    assign o_current_ram_rd_en = scan_need_current_w;
+    assign o_current_ram_rd_addr = scan_addr_w;
 
     assign pipeline_busy_w = pipeline_busy_comb;
     assign process_addr_w = addr_pipeline_reg[BRAM_READ_LATENCY-1];
+    assign process_has_current_w = current_valid_pipeline_reg[BRAM_READ_LATENCY-1];
     assign clear_membrane_en_w = (current_state_reg == S_CLEAR);
     assign membrane_ram_write_en_w = clear_membrane_en_w || lif_membrane_write_en_w;
     assign membrane_ram_write_addr_w = clear_membrane_en_w ? clear_addr_reg : process_addr_w;
@@ -118,7 +122,9 @@ module conv_lif_layer_sparse #(
                                       (current_state_reg == S_FLUSHING)) &&
                                      valid_pipeline_reg[BRAM_READ_LATENCY-1];
     assign lif_membrane_write_data_w = process_spike_w ? LP_V_RESET_FIXED : process_candidate_w;
-    assign process_input_current_w = latched_currents_reg[process_addr_w];
+    assign process_input_current_w = process_has_current_w ?
+                                     i_current_ram_rd_data :
+                                     {P_NEURON_VALUE_TOTAL_BITS{1'b0}};
     assign process_membrane_w = membrane_ram_read_data_w;
 
     simple_dual_port_ram #(
@@ -136,8 +142,7 @@ module conv_lif_layer_sparse #(
     );
 
     /*
-     * 输入脉冲向量沿用工程约定：
-     * 最高位对应左上角像素，最低位对应右下角像素。
+     * 输入脉冲向量沿用工程约定：最高位对应左上角，最低位对应右下角。
      */
     function get_input_spike;
         input [P_NUM_INPUT_PIXELS-1:0] spikes;
@@ -155,8 +160,7 @@ module conv_lif_layer_sparse #(
     endfunction
 
     /*
-     * 根据卷积后神经元地址反推出对应的输出像素位置，
-     * 再检查该输出像素 3x3 感受野内是否存在输入脉冲。
+     * 根据神经元地址反推出输出像素位置，并判断其 3x3 感受野内是否存在输入脉冲。
      */
     function receptive_field_active;
         input [P_NUM_INPUT_PIXELS-1:0] spikes;
@@ -188,7 +192,7 @@ module conv_lif_layer_sparse #(
     endfunction
 
     /*
-     * tau 固定为 2，因此泄漏积分仍然用算术右移 1 位实现。
+     * tau 固定为 2，因此泄露积分用算术右移 1 位实现。
      */
     assign process_diff_w = process_input_current_w - process_membrane_w;
     assign process_delta_w = process_diff_w >>> 1;
@@ -278,23 +282,19 @@ module conv_lif_layer_sparse #(
     end
 
     /*
-     * 每个时间步启动时锁存输入脉冲图和卷积电流，保证处理过程中输入稳定。
+     * 每个时间步启动时锁存输入脉冲图，保证处理过程中输入稳定。
      */
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             latched_input_spikes_reg <= {P_NUM_INPUT_PIXELS{1'b0}};
-            for (current_reset_idx = 0; current_reset_idx < P_NUM_NEURONS; current_reset_idx = current_reset_idx + 1) begin
-                latched_currents_reg[current_reset_idx] <= {P_NEURON_VALUE_TOTAL_BITS{1'b0}};
-            end
         end else if (current_state_reg == S_IDLE && next_state_reg == S_PROCESSING) begin
             latched_input_spikes_reg <= i_input_spike_vector;
-            latched_currents_reg <= i_all_currents_I;
         end
     end
 
     /*
      * 地址扫描与 RAM 读请求流水线。
-     * 每个地址都会扫描，但只有 need_update 为 1 时才真正访问膜电位 RAM。
+     * scan_need_current_w 只控制 current RAM，scan_need_update_w 控制膜电位 RAM 和 LIF 更新。
      */
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -302,6 +302,7 @@ module conv_lif_layer_sparse #(
             for (pipe_idx = 0; pipe_idx < BRAM_READ_LATENCY; pipe_idx = pipe_idx + 1) begin
                 addr_pipeline_reg[pipe_idx] <= {LP_ADDR_WIDTH{1'b0}};
                 valid_pipeline_reg[pipe_idx] <= 1'b0;
+                current_valid_pipeline_reg[pipe_idx] <= 1'b0;
             end
         end else begin
             if (current_state_reg == S_IDLE && next_state_reg == S_PROCESSING) begin
@@ -309,14 +310,17 @@ module conv_lif_layer_sparse #(
                 for (pipe_idx = 0; pipe_idx < BRAM_READ_LATENCY; pipe_idx = pipe_idx + 1) begin
                     addr_pipeline_reg[pipe_idx] <= {LP_ADDR_WIDTH{1'b0}};
                     valid_pipeline_reg[pipe_idx] <= 1'b0;
+                    current_valid_pipeline_reg[pipe_idx] <= 1'b0;
                 end
             end else if (current_state_reg == S_PROCESSING || current_state_reg == S_FLUSHING) begin
                 for (pipe_idx = BRAM_READ_LATENCY - 1; pipe_idx > 0; pipe_idx = pipe_idx - 1) begin
                     addr_pipeline_reg[pipe_idx] <= addr_pipeline_reg[pipe_idx-1];
                     valid_pipeline_reg[pipe_idx] <= valid_pipeline_reg[pipe_idx-1];
+                    current_valid_pipeline_reg[pipe_idx] <= current_valid_pipeline_reg[pipe_idx-1];
                 end
 
                 valid_pipeline_reg[0] <= scan_need_update_w;
+                current_valid_pipeline_reg[0] <= scan_need_current_w;
                 if (scan_need_update_w) begin
                     addr_pipeline_reg[0] <= scan_addr_w;
                 end else begin
@@ -332,7 +336,6 @@ module conv_lif_layer_sparse #(
 
     /*
      * active bit 只在真正完成 LIF 更新后修改。
-     * 发放脉冲后膜电位复位，因此 active bit 也清 0。
      */
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -383,7 +386,7 @@ module conv_lif_layer_sparse #(
     end
 
     /*
-     * 帧结束信号仍然保持和原模块一致，在 S_DONE 状态拉高一个周期。
+     * 帧结束信号保持和原模块一致，在 S_DONE 状态拉高一个周期。
      */
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
