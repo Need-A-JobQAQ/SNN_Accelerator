@@ -37,6 +37,7 @@ module conv_lif_tb();
     wire [$clog2(P_NUM_NEURONS)-1:0] current_ram_rd_addr;
     wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] current_ram_rd_data;
     wire current_ram_rd_valid;
+    wire [P_NUM_NEURONS-1:0] current_valid_bitmap;
 
     reg r_enable_layer;
     reg r_enable_layer_pending;
@@ -72,6 +73,7 @@ module conv_lif_tb();
         .o_current_rd_data          (current_ram_rd_data),
         .o_current_rd_valid         (current_ram_rd_valid),
         .o_current_ram_ready        (current_ram_ready),
+        .o_current_valid_bitmap    (current_valid_bitmap),
         .o_all_currents_I           (all_currents_I),
         .o_all_currents_valid       (all_currents_valid)
     );
@@ -185,3 +187,4 @@ module conv_lif_tb();
     end
 
 endmodule
+

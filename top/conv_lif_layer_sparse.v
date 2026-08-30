@@ -13,6 +13,7 @@ module conv_lif_layer_sparse #(
     input wire rst_n,
     input wire i_enable_layer,
     input wire [P_NUM_INPUT_PIXELS-1:0] i_input_spike_vector,
+    input wire [P_NUM_NEURONS-1:0] i_current_valid_bitmap,
     input wire signed [P_NUM_NEURONS-1:0][P_NEURON_VALUE_TOTAL_BITS-1:0] i_all_currents_I,
     input wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] i_current_ram_rd_data,
     input wire i_current_ram_rd_valid,
@@ -31,7 +32,7 @@ module conv_lif_layer_sparse #(
 
     /*
      * 稀疏卷积 LIF 层。
-     * 本模块仍然扫描所有神经元地址，但只有“感受野活跃”或“膜电位仍活跃”时才更新。
+     * 本模块仍然扫描所有神经元地址，但只有“电流有效”或“膜电位仍活跃”时才更新。
      * 卷积电流不再由大数组输入，而是通过 current RAM 读口按需读取。
      */
     localparam LP_ADDR_WIDTH = $clog2(P_NUM_NEURONS);
@@ -57,10 +58,10 @@ module conv_lif_layer_sparse #(
     reg [2:0] next_state_reg;
 
     reg [P_NUM_INPUT_PIXELS-1:0] latched_input_spikes_reg;
+    reg [P_NUM_NEURONS-1:0] latched_current_valid_bitmap_reg;
     reg [P_NUM_NEURONS-1:0] active_state_bitmap_reg;
 
     reg [LP_ADDR_WIDTH-1:0] clear_addr_reg;
-    reg [LP_COUNT_WIDTH-1:0] issued_addr_count_reg;
 
     reg [LP_ADDR_WIDTH-1:0] addr_pipeline_reg [BRAM_READ_LATENCY-1:0];
     reg valid_pipeline_reg [BRAM_READ_LATENCY-1:0];
@@ -74,6 +75,15 @@ module conv_lif_layer_sparse #(
     wire scan_need_update_w;
     wire scan_need_current_w;
     wire pipeline_busy_w;
+    wire [P_NUM_NEURONS-1:0] active_bitmap_start_w;
+
+    wire compactor_start_w;
+    wire compactor_addr_ready_w;
+    wire compactor_addr_valid_w;
+    wire [LP_ADDR_WIDTH-1:0] compactor_addr_w;
+    wire compactor_done_w;
+    wire compactor_busy_w;
+    wire [31:0] compactor_active_count_w;
 
     wire clear_membrane_en_w;
     wire membrane_ram_write_en_w;
@@ -99,13 +109,15 @@ module conv_lif_layer_sparse #(
     integer busy_idx;
 
     assign o_layer_ready = (current_state_reg == S_IDLE);
-    assign scan_addr_valid_w = (current_state_reg == S_PROCESSING) &&
-                               (issued_addr_count_reg < P_NUM_NEURONS);
-    assign scan_addr_w = issued_addr_count_reg[LP_ADDR_WIDTH-1:0];
-    assign scan_rf_active_w = receptive_field_active(latched_input_spikes_reg, scan_addr_w);
-    assign scan_state_active_w = active_state_bitmap_reg[scan_addr_w];
-    assign scan_need_current_w = scan_addr_valid_w && scan_rf_active_w;
-    assign scan_need_update_w = scan_addr_valid_w && (scan_rf_active_w || scan_state_active_w);
+    assign active_bitmap_start_w = i_current_valid_bitmap | active_state_bitmap_reg;           //i_current_valid_bitmap是本时间步下上一级模块结束的时候准备好的，active_state_bitmap_reg是上一个时间步本模块结束的时候准备好的
+    assign compactor_start_w = (current_state_reg == S_IDLE) && (next_state_reg == S_PROCESSING);
+    assign compactor_addr_ready_w = (current_state_reg == S_PROCESSING);
+    assign scan_addr_valid_w = (current_state_reg == S_PROCESSING) && compactor_addr_valid_w;  // compactor送过来的地址是有效的，那么scan_need_update_w就是有效的
+    assign scan_addr_w = compactor_addr_w;
+    assign scan_rf_active_w = latched_current_valid_bitmap_reg[scan_addr_w];
+    assign scan_state_active_w = active_state_bitmap_reg[scan_addr_w];                         // 没用了
+    assign scan_need_current_w = scan_addr_valid_w && scan_rf_active_w;                        // scan_addr_w是有效的，并且scan_addr对应的current_bitmap也是有效的，就把电流读出来
+    assign scan_need_update_w = scan_addr_valid_w;                                             //
 
     assign o_current_ram_rd_en = scan_need_current_w;
     assign o_current_ram_rd_addr = scan_addr_w;
@@ -139,6 +151,22 @@ module conv_lif_layer_sparse #(
         .i_read_en      (scan_need_update_w),
         .i_read_addr    (scan_addr_w),
         .o_read_data    (membrane_ram_read_data_w)
+    );
+
+    bitmap_to_addr_stream #(
+        .P_BITMAP_WIDTH  (P_NUM_NEURONS),
+        .P_ADDR_WIDTH    (LP_ADDR_WIDTH)
+    ) u_active_bitmap_compactor (                         //compact v. 压实，把...紧压在一起
+        .clk             (clk),
+        .rst_n           (rst_n),
+        .i_start         (compactor_start_w),
+        .i_active_bitmap (active_bitmap_start_w),
+        .i_addr_ready    (compactor_addr_ready_w),
+        .o_addr_valid    (compactor_addr_valid_w),
+        .o_addr          (compactor_addr_w),
+        .o_done          (compactor_done_w),
+        .o_busy          (compactor_busy_w),
+        .o_active_count  (compactor_active_count_w)
     );
 
     /*
@@ -234,7 +262,7 @@ module conv_lif_layer_sparse #(
             end
 
             S_PROCESSING: begin
-                if (issued_addr_count_reg == P_NUM_NEURONS) begin
+                if (compactor_done_w) begin
                     next_state_reg = S_FLUSHING;
                 end
             end
@@ -282,13 +310,18 @@ module conv_lif_layer_sparse #(
     end
 
     /*
-     * 每个时间步启动时锁存输入脉冲图，保证处理过程中输入稳定。
+     * 每个时间步启动时锁存输入脉冲图和 current 有效位图，保证处理过程中输入稳定。
+     * 当前 sparse 扫描只使用 current 有效位图，输入脉冲图保留给兼容和后续调试。
      */
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             latched_input_spikes_reg <= {P_NUM_INPUT_PIXELS{1'b0}};
+            latched_current_valid_bitmap_reg <= {P_NUM_NEURONS{1'b0}};
         end else if (current_state_reg == S_IDLE && next_state_reg == S_PROCESSING) begin
             latched_input_spikes_reg <= i_input_spike_vector;
+            latched_current_valid_bitmap_reg <= i_current_valid_bitmap;
+        end else if (current_state_reg == S_DONE) begin
+            latched_current_valid_bitmap_reg <= {P_NUM_NEURONS{1'b0}};
         end
     end
 
@@ -298,7 +331,6 @@ module conv_lif_layer_sparse #(
      */
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            issued_addr_count_reg <= {LP_COUNT_WIDTH{1'b0}};
             for (pipe_idx = 0; pipe_idx < BRAM_READ_LATENCY; pipe_idx = pipe_idx + 1) begin
                 addr_pipeline_reg[pipe_idx] <= {LP_ADDR_WIDTH{1'b0}};
                 valid_pipeline_reg[pipe_idx] <= 1'b0;
@@ -306,7 +338,6 @@ module conv_lif_layer_sparse #(
             end
         end else begin
             if (current_state_reg == S_IDLE && next_state_reg == S_PROCESSING) begin
-                issued_addr_count_reg <= {LP_COUNT_WIDTH{1'b0}};
                 for (pipe_idx = 0; pipe_idx < BRAM_READ_LATENCY; pipe_idx = pipe_idx + 1) begin
                     addr_pipeline_reg[pipe_idx] <= {LP_ADDR_WIDTH{1'b0}};
                     valid_pipeline_reg[pipe_idx] <= 1'b0;
@@ -325,10 +356,6 @@ module conv_lif_layer_sparse #(
                     addr_pipeline_reg[0] <= scan_addr_w;
                 end else begin
                     addr_pipeline_reg[0] <= {LP_ADDR_WIDTH{1'b0}};
-                end
-
-                if (scan_addr_valid_w) begin
-                    issued_addr_count_reg <= issued_addr_count_reg + 1'b1;
                 end
             end
         end
@@ -366,8 +393,8 @@ module conv_lif_layer_sparse #(
                 o_skip_count <= 32'd0;
                 o_update_count <= 32'd0;
             end else begin
-                if (scan_addr_valid_w && !scan_need_update_w) begin
-                    o_skip_count <= o_skip_count + 1'b1;
+                if (compactor_done_w) begin
+                    o_skip_count <= P_NUM_NEURONS - compactor_active_count_w;
                 end
 
                 if (lif_membrane_write_en_w) begin

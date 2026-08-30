@@ -75,6 +75,7 @@ module snn_top #(
     wire [LP_CONV_AER_ADDR_WIDTH-1:0] conv_current_ram_rd_addr;
     wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] conv_current_ram_rd_data;
     wire conv_current_ram_rd_valid;
+    wire [LP_NUM_CONV_FEATURES-1:0] conv_current_valid_bitmap;
     wire conv_lif_input_ready_w;
     wire [LP_NUM_CONV_FEATURES-1:0] conv_lif_output_spikes;
     wire conv_lif_spikes_valid;
@@ -225,6 +226,7 @@ module snn_top #(
         .o_current_rd_data     (conv_current_ram_rd_data),
         .o_current_rd_valid    (conv_current_ram_rd_valid),
         .o_current_ram_ready   (conv_current_ram_ready),
+        .o_current_valid_bitmap(conv_current_valid_bitmap),
         .o_all_currents_I       (conv_currents),
         .o_all_currents_valid   (conv_currents_valid)
     );
@@ -309,6 +311,7 @@ module snn_top #(
                 .rst_n                  (rst_n),
                 .i_enable_layer         (conv_lif_actual_enable_r),
                 .i_input_spike_vector   (encoded_spikes),
+                .i_current_valid_bitmap (conv_current_valid_bitmap),
                 .i_all_currents_I       (conv_currents),
                 .i_current_ram_rd_data  (conv_current_ram_rd_data),
                 .i_current_ram_rd_valid (conv_current_ram_rd_valid),

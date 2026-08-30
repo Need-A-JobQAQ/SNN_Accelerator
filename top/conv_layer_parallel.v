@@ -23,6 +23,7 @@ module conv_layer_parallel #(
     output reg signed [P_NEURON_VALUE_TOTAL_BITS-1:0] o_current_rd_data,
     output reg o_current_rd_valid,
     output reg o_current_ram_ready,
+    output reg [P_NUM_OUTPUT_CHANNELS * P_NUM_INPUT_PIXELS - 1:0] o_current_valid_bitmap,
 
     output reg signed [P_NUM_OUTPUT_CHANNELS * P_NUM_INPUT_PIXELS - 1:0][P_NEURON_VALUE_TOTAL_BITS-1:0] o_all_currents_I,
     output reg o_all_currents_valid
@@ -50,11 +51,13 @@ module conv_layer_parallel #(
     wire ch0_current_valid_w;
     wire [LP_ADDR_WIDTH-1:0] ch0_current_addr_w;
     wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] ch0_current_data_w;
+    wire ch0_current_active_w;
     wire ch0_done_w;
 
     wire ch1_current_valid_w;
     wire [LP_ADDR_WIDTH-1:0] ch1_current_addr_w;
     wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] ch1_current_data_w;
+    wire ch1_current_active_w;
     wire ch1_done_w;
 
     wire compat_read_en_w;
@@ -104,6 +107,7 @@ module conv_layer_parallel #(
         .o_current_valid        (ch0_current_valid_w),
         .o_current_addr         (ch0_current_addr_w),
         .o_current_data         (ch0_current_data_w),
+        .o_current_active       (ch0_current_active_w),
         .o_done                 (ch0_done_w)
     );
 
@@ -124,6 +128,7 @@ module conv_layer_parallel #(
         .o_current_valid        (ch1_current_valid_w),
         .o_current_addr         (ch1_current_addr_w),
         .o_current_data         (ch1_current_data_w),
+        .o_current_active       (ch1_current_active_w),
         .o_done                 (ch1_done_w)
     );
 
@@ -170,7 +175,7 @@ module conv_layer_parallel #(
 
             S_WAIT_PE: begin
                 if (ch0_done_w && ch1_done_w) begin
-                    if (P_ENABLE_COMPAT_READBACK) begin
+                    if (P_ENABLE_COMPAT_READBACK) begin                   //compat是compatability的简写，意味兼容。readback是为了维护o_all_currents_I端口，为了兼容没有更新的模块
                         next_state_reg = S_READ_BACK;
                     end else begin
                         next_state_reg = S_DONE;
@@ -221,6 +226,29 @@ module conv_layer_parallel #(
             o_current_ram_ready <= 1'b0;
             if (current_state_reg == S_WAIT_PE && ch0_done_w && ch1_done_w) begin
                 o_current_ram_ready <= 1'b1;
+            end
+        end
+    end
+
+    /*
+     * current 有效位图。
+     * bit=1 表示该神经元地址对应的 3x3 感受野在当前时间步存在输入脉冲。
+     * 低 784 位对应通道 0，高 784 位对应通道 1。
+     */
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            o_current_valid_bitmap <= {LP_TOTAL_FEATURES{1'b0}};
+        end else begin
+            if (current_state_reg == S_IDLE && next_state_reg == S_WAIT_PE) begin
+                o_current_valid_bitmap <= {LP_TOTAL_FEATURES{1'b0}};
+            end else begin
+                if (ch0_current_valid_w) begin
+                    o_current_valid_bitmap[ch0_current_addr_w] <= ch0_current_active_w;
+                end
+
+                if (ch1_current_valid_w) begin
+                    o_current_valid_bitmap[P_NUM_INPUT_PIXELS + ch1_current_addr_w] <= ch1_current_active_w;
+                end
             end
         end
     end

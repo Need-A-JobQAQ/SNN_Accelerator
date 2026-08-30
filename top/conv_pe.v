@@ -17,6 +17,7 @@ module conv_pe #(
     output reg o_current_valid,
     output reg [$clog2(P_NUM_INPUT_PIXELS)-1:0] o_current_addr,
     output reg signed [P_NEURON_VALUE_TOTAL_BITS-1:0] o_current_data,
+    output reg o_current_active,
     output reg o_done
 );
 
@@ -42,6 +43,7 @@ module conv_pe #(
     reg signed [P_NEURON_VALUE_TOTAL_BITS-1:0] current_conv_sum_comb;
     reg signed [P_WEIGHT_BIT_WIDTH-1:0] conv_weight_comb;
     reg input_spike_comb;
+    reg current_active_comb;
 
     integer kernel_row_comb;
     integer kernel_col_comb;
@@ -87,6 +89,7 @@ module conv_pe #(
         current_conv_sum_comb = {P_NEURON_VALUE_TOTAL_BITS{1'b0}};
         conv_weight_comb = {P_WEIGHT_BIT_WIDTH{1'b0}};
         input_spike_comb = 1'b0;
+        current_active_comb = 1'b0;
 
         for (kernel_row_comb = 0; kernel_row_comb < P_KERNEL_SIZE; kernel_row_comb = kernel_row_comb + 1) begin
             for (kernel_col_comb = 0; kernel_col_comb < P_KERNEL_SIZE; kernel_col_comb = kernel_col_comb + 1) begin
@@ -97,6 +100,7 @@ module conv_pe #(
                     col_reg + kernel_col_comb - P_PADDING);
 
                 if (input_spike_comb) begin
+                    current_active_comb = 1'b1;
                     conv_weight_comb = get_kernel_weight(kernel_idx_comb);
                     current_conv_sum_comb = current_conv_sum_comb +
                         {{(P_NEURON_VALUE_TOTAL_BITS - P_WEIGHT_BIT_WIDTH){conv_weight_comb[P_WEIGHT_BIT_WIDTH-1]}},
@@ -188,12 +192,15 @@ module conv_pe #(
             o_current_valid <= 1'b0;
             o_current_addr <= {$clog2(P_NUM_INPUT_PIXELS){1'b0}};
             o_current_data <= {P_NEURON_VALUE_TOTAL_BITS{1'b0}};
+            o_current_active <= 1'b0;
         end else begin
             o_current_valid <= 1'b0;
+            o_current_active <= 1'b0;
             if (current_state_reg == S_PROCESS) begin
                 o_current_valid <= 1'b1;
                 o_current_addr <= write_idx_reg;
                 o_current_data <= current_conv_sum_comb;
+                o_current_active <= current_active_comb;
             end
         end
     end
