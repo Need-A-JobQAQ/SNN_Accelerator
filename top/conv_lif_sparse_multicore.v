@@ -18,6 +18,7 @@ module conv_lif_sparse_multicore #(
     input wire rst_n,
     input wire i_enable_layer,
     input wire [P_NUM_INPUT_PIXELS-1:0] i_input_spike_vector,
+    input wire [P_NUM_NEURONS-1:0] i_current_valid_bitmap,
     input wire signed [P_NUM_NEURONS-1:0][P_NEURON_VALUE_TOTAL_BITS-1:0] i_all_currents_I,
 
     output wire [P_NUM_NEURONS-1:0] o_all_spikes_out,
@@ -28,6 +29,7 @@ module conv_lif_sparse_multicore #(
     output wire o_layer_ready,
     output wire [31:0] o_skip_count,
     output wire [31:0] o_update_count,
+    output wire [P_NUM_CORES-1:0][31:0] o_core_event_count,
     output wire [P_NUM_CORES-1:0][P_CORE_FIFO_COUNT_WIDTH-1:0] o_core_fifo_count,
     output wire [P_NUM_CORES-1:0][P_CORE_FIFO_COUNT_WIDTH-1:0] o_core_fifo_max_count,
     output wire o_core_fifo_overflow
@@ -47,6 +49,7 @@ module conv_lif_sparse_multicore #(
     wire [P_NUM_CORES * P_CORE_NUM_NEURONS - 1:0] core_spikes_flat_w;
     wire [P_NUM_CORES-1:0][31:0] core_skip_count_w;
     wire [P_NUM_CORES-1:0][31:0] core_update_count_w;
+    wire [P_NUM_CORES-1:0][31:0] core_event_count_w;
 
     wire [P_NUM_CORES-1:0] fifo_event_valid_w;
     wire [P_NUM_CORES-1:0][LP_ADDR_WIDTH-1:0] fifo_event_addr_w;
@@ -57,10 +60,11 @@ module conv_lif_sparse_multicore #(
     wire [P_NUM_CORES-1:0] arbiter_ready_w;
 
     wire all_cores_ready_w;
-    wire all_cores_done_w;
+    wire all_cores_done_seen_w;
     wire all_fifos_empty_w;
     wire frame_complete_w;
 
+    reg [P_NUM_CORES-1:0] core_done_seen_reg;
     reg frame_done_pending_reg;
     reg [P_NUM_CORES-1:0][P_CORE_FIFO_COUNT_WIDTH-1:0] core_fifo_max_count_reg;
 
@@ -68,13 +72,14 @@ module conv_lif_sparse_multicore #(
     genvar spike_idx;
 
     assign all_cores_ready_w = &core_ready_w;
-    assign all_cores_done_w = &core_done_w;
+    assign all_cores_done_seen_w = &core_done_seen_reg;
     assign all_fifos_empty_w = &fifo_empty_w;
     assign frame_complete_w = frame_done_pending_reg && all_fifos_empty_w;
     assign o_layer_ready = all_cores_ready_w;
     assign o_core_fifo_count = fifo_count_w;
     assign o_core_fifo_max_count = core_fifo_max_count_reg;
     assign o_core_fifo_overflow = |fifo_overflow_w;
+    assign o_core_event_count = core_event_count_w;
 
     /*
      * 统计计数按 core 求和。
@@ -103,6 +108,8 @@ module conv_lif_sparse_multicore #(
                 .rst_n                  (rst_n),
                 .i_enable_core          (i_enable_layer),
                 .i_input_spike_vector   (i_input_spike_vector),
+                .i_current_valid_bitmap (i_current_valid_bitmap[(core_idx + 1) * P_CORE_NUM_NEURONS - 1:
+                                                                core_idx * P_CORE_NUM_NEURONS]),
                 .i_all_currents_I       (i_all_currents_I),
                 .o_core_spikes_out      (core_spikes_flat_w[(core_idx + 1) * P_CORE_NUM_NEURONS - 1:
                                                             core_idx * P_CORE_NUM_NEURONS]),
@@ -111,7 +118,8 @@ module conv_lif_sparse_multicore #(
                 .o_event_addr           (core_event_addr_w[core_idx]),
                 .o_core_ready           (core_ready_w[core_idx]),
                 .o_skip_count           (core_skip_count_w[core_idx]),
-                .o_update_count         (core_update_count_w[core_idx])
+                .o_update_count         (core_update_count_w[core_idx]),
+                .o_event_count          (core_event_count_w[core_idx])
             );
 
             aer_event_fifo #(
@@ -155,6 +163,20 @@ module conv_lif_sparse_multicore #(
     );
 
     /*
+     * addr_stream 化以后，各 core 的处理地址数量不同，
+     * done 脉冲不再保证同一拍出现，所以需要逐 core 锁存完成状态。
+     */
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            core_done_seen_reg <= {P_NUM_CORES{1'b0}};
+        end else if (i_enable_layer || frame_complete_w) begin
+            core_done_seen_reg <= {P_NUM_CORES{1'b0}};
+        end else begin
+            core_done_seen_reg <= core_done_seen_reg | core_done_w;
+        end
+    end
+
+    /*
      * 记录每个 core 本地 FIFO 在当前时间步内达到过的最高水位。
      * 新时间步启动时清零，后续只在当前水位更高时更新。
      */
@@ -181,10 +203,10 @@ module conv_lif_sparse_multicore #(
         end else begin
             if (i_enable_layer) begin
                 frame_done_pending_reg <= 1'b0;
-            end else if (all_cores_done_w) begin
-                frame_done_pending_reg <= 1'b1;
             end else if (frame_complete_w) begin
                 frame_done_pending_reg <= 1'b0;
+            end else if (all_cores_done_seen_w) begin
+                frame_done_pending_reg <= 1'b1;
             end
         end
     end

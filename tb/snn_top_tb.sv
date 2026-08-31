@@ -27,8 +27,8 @@ module snn_top_tb;
     localparam P_CONV_OUT_CHANNELS         = 2;
     localparam P_CONV_KERNEL_SIZE          = 3;
     localparam P_CONV_PADDING              = 1;
-    localparam P_USE_MASKED_FC             = 1;
-    localparam P_USE_SPARSE_CONV_LIF       = 1;
+    localparam P_USE_MASKED_FC             = 0;
+    localparam P_USE_SPARSE_CONV_LIF       = 0;
     localparam P_USE_MULTICORE_CONV_LIF    = 1;
     localparam P_CONV_WEIGHT_PACKED_WIDTH  = P_CONV_KERNEL_SIZE * P_CONV_KERNEL_SIZE * P_WEIGHT_BIT_WIDTH;
     localparam [P_CONV_WEIGHT_PACKED_WIDTH-1:0] P_CONV0_WEIGHTS_PACKED = {16'hFA52,16'h1085,16'hFF5B,

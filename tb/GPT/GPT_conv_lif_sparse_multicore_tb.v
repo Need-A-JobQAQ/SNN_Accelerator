@@ -20,15 +20,21 @@ module GPT_conv_lif_sparse_multicore_tb;
     reg enable_layer;
     reg [P_NUM_INPUT_PIXELS-1:0] input_spikes;
     reg signed [P_NUM_NEURONS-1:0][P_NEURON_VALUE_TOTAL_BITS-1:0] currents;
+    reg [P_NUM_NEURONS-1:0] current_valid_bitmap;
 
     wire [P_NUM_NEURONS-1:0] single_spikes;
     wire single_valid;
     wire single_event_valid;
     wire [$clog2(P_NUM_NEURONS)-1:0] single_event_addr;
+    wire single_current_rd_en;
+    wire [$clog2(P_NUM_NEURONS)-1:0] single_current_rd_addr;
+    wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] single_current_rd_data;
     wire single_frame_done;
     wire single_ready;
     wire [31:0] single_skip_count;
     wire [31:0] single_update_count;
+
+    assign single_current_rd_data = currents[single_current_rd_addr];
 
     wire [P_NUM_NEURONS-1:0] multi_spikes;
     wire multi_valid;
@@ -39,6 +45,7 @@ module GPT_conv_lif_sparse_multicore_tb;
     wire [31:0] multi_skip_count;
     wire [31:0] multi_update_count;
     wire [P_NUM_CORES-1:0][$clog2(16 + 1)-1:0] multi_core_fifo_count;
+    wire [P_NUM_CORES-1:0][31:0] multi_core_event_count;
     wire [P_NUM_CORES-1:0][$clog2(16 + 1)-1:0] multi_core_fifo_max_count;
     wire multi_fifo_overflow;
 
@@ -62,7 +69,12 @@ module GPT_conv_lif_sparse_multicore_tb;
         .rst_n                  (rst_n),
         .i_enable_layer         (enable_layer),
         .i_input_spike_vector   (input_spikes),
+        .i_current_valid_bitmap (current_valid_bitmap),
         .i_all_currents_I       (currents),
+        .i_current_ram_rd_data  (single_current_rd_data),
+        .i_current_ram_rd_valid (single_current_rd_en),
+        .o_current_ram_rd_en    (single_current_rd_en),
+        .o_current_ram_rd_addr  (single_current_rd_addr),
         .o_all_spikes_out       (single_spikes),
         .o_all_spikes_valid     (single_valid),
         .o_event_valid          (single_event_valid),
@@ -92,6 +104,7 @@ module GPT_conv_lif_sparse_multicore_tb;
         .rst_n                  (rst_n),
         .i_enable_layer         (enable_layer),
         .i_input_spike_vector   (input_spikes),
+        .i_current_valid_bitmap (current_valid_bitmap),
         .i_all_currents_I       (currents),
         .o_all_spikes_out       (multi_spikes),
         .o_all_spikes_valid     (multi_valid),
@@ -101,6 +114,7 @@ module GPT_conv_lif_sparse_multicore_tb;
         .o_layer_ready          (multi_ready),
         .o_skip_count           (multi_skip_count),
         .o_update_count         (multi_update_count),
+        .o_core_event_count     (multi_core_event_count),
         .o_core_fifo_count      (multi_core_fifo_count),
         .o_core_fifo_max_count  (multi_core_fifo_max_count),
         .o_core_fifo_overflow   (multi_fifo_overflow)
@@ -114,6 +128,7 @@ module GPT_conv_lif_sparse_multicore_tb;
     task clear_inputs;
         begin
             input_spikes = {P_NUM_INPUT_PIXELS{1'b0}};
+            current_valid_bitmap = {P_NUM_NEURONS{1'b0}};
             for (idx = 0; idx < P_NUM_NEURONS; idx = idx + 1) begin
                 currents[idx] = {P_NEURON_VALUE_TOTAL_BITS{1'b0}};
             end
@@ -191,6 +206,7 @@ module GPT_conv_lif_sparse_multicore_tb;
 
         clear_inputs();
         input_spikes[P_NUM_INPUT_PIXELS-1] = 1'b1;
+        current_valid_bitmap = {P_NUM_NEURONS{1'b1}};
         for (idx = 0; idx < P_NUM_NEURONS; idx = idx + 1) begin
             currents[idx] = ONE_FIXED;
         end
@@ -208,7 +224,14 @@ module GPT_conv_lif_sparse_multicore_tb;
         $display("SIM_INFO: core_fifo_max_count={%0d,%0d,%0d,%0d}",
                  multi_core_fifo_max_count[3], multi_core_fifo_max_count[2],
                  multi_core_fifo_max_count[1], multi_core_fifo_max_count[0]);
+        $display("SIM_INFO: core_event_count={%0d,%0d,%0d,%0d}",
+                 multi_core_event_count[3], multi_core_event_count[2],
+                 multi_core_event_count[1], multi_core_event_count[0]);
         $finish;
     end
 
 endmodule
+
+
+
+

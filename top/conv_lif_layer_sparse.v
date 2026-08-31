@@ -36,7 +36,6 @@ module conv_lif_layer_sparse #(
      * 卷积电流不再由大数组输入，而是通过 current RAM 读口按需读取。
      */
     localparam LP_ADDR_WIDTH = $clog2(P_NUM_NEURONS);
-    localparam LP_COUNT_WIDTH = $clog2(P_NUM_NEURONS + 1);
     localparam BRAM_READ_LATENCY = 1;
 
     localparam signed [P_NEURON_VALUE_TOTAL_BITS-1:0] LP_V_THRESHOLD_FIXED =
@@ -57,7 +56,6 @@ module conv_lif_layer_sparse #(
     reg [2:0] current_state_reg;
     reg [2:0] next_state_reg;
 
-    reg [P_NUM_INPUT_PIXELS-1:0] latched_input_spikes_reg;
     reg [P_NUM_NEURONS-1:0] latched_current_valid_bitmap_reg;
     reg [P_NUM_NEURONS-1:0] active_state_bitmap_reg;
 
@@ -70,8 +68,7 @@ module conv_lif_layer_sparse #(
 
     wire scan_addr_valid_w;
     wire [LP_ADDR_WIDTH-1:0] scan_addr_w;
-    wire scan_rf_active_w;
-    wire scan_state_active_w;
+    wire scan_current_valid_w;
     wire scan_need_update_w;
     wire scan_need_current_w;
     wire pipeline_busy_w;
@@ -114,9 +111,8 @@ module conv_lif_layer_sparse #(
     assign compactor_addr_ready_w = (current_state_reg == S_PROCESSING);
     assign scan_addr_valid_w = (current_state_reg == S_PROCESSING) && compactor_addr_valid_w;  // compactor送过来的地址是有效的，那么scan_need_update_w就是有效的
     assign scan_addr_w = compactor_addr_w;
-    assign scan_rf_active_w = latched_current_valid_bitmap_reg[scan_addr_w];
-    assign scan_state_active_w = active_state_bitmap_reg[scan_addr_w];                         // 没用了
-    assign scan_need_current_w = scan_addr_valid_w && scan_rf_active_w;                        // scan_addr_w是有效的，并且scan_addr对应的current_bitmap也是有效的，就把电流读出来
+    assign scan_current_valid_w = latched_current_valid_bitmap_reg[scan_addr_w];
+    assign scan_need_current_w = scan_addr_valid_w && scan_current_valid_w;                    // scan_addr_w有效，并且对应 current bitmap 有效时，才读取卷积电流
     assign scan_need_update_w = scan_addr_valid_w;                                             //
 
     assign o_current_ram_rd_en = scan_need_current_w;
@@ -168,56 +164,6 @@ module conv_lif_layer_sparse #(
         .o_busy          (compactor_busy_w),
         .o_active_count  (compactor_active_count_w)
     );
-
-    /*
-     * 输入脉冲向量沿用工程约定：最高位对应左上角，最低位对应右下角。
-     */
-    function get_input_spike;
-        input [P_NUM_INPUT_PIXELS-1:0] spikes;
-        input integer row;
-        input integer col;
-        integer flat_idx;
-        begin
-            if (row < 0 || row >= P_INPUT_HEIGHT || col < 0 || col >= P_INPUT_WIDTH) begin
-                get_input_spike = 1'b0;
-            end else begin
-                flat_idx = (row * P_INPUT_WIDTH) + col;
-                get_input_spike = spikes[P_NUM_INPUT_PIXELS - 1 - flat_idx];
-            end
-        end
-    endfunction
-
-    /*
-     * 根据神经元地址反推出输出像素位置，并判断其 3x3 感受野内是否存在输入脉冲。
-     */
-    function receptive_field_active;
-        input [P_NUM_INPUT_PIXELS-1:0] spikes;
-        input [LP_ADDR_WIDTH-1:0] neuron_addr;
-        integer local_addr;
-        integer spatial_idx;
-        integer out_row;
-        integer out_col;
-        integer kernel_row;
-        integer kernel_col;
-        begin
-            receptive_field_active = 1'b0;
-
-            local_addr = neuron_addr % P_NUM_INPUT_PIXELS;
-            spatial_idx = P_NUM_INPUT_PIXELS - 1 - local_addr;
-            out_row = spatial_idx / P_INPUT_WIDTH;
-            out_col = spatial_idx % P_INPUT_WIDTH;
-
-            for (kernel_row = 0; kernel_row < P_KERNEL_SIZE; kernel_row = kernel_row + 1) begin
-                for (kernel_col = 0; kernel_col < P_KERNEL_SIZE; kernel_col = kernel_col + 1) begin
-                    if (get_input_spike(spikes,
-                                        out_row + kernel_row - P_PADDING,
-                                        out_col + kernel_col - P_PADDING)) begin
-                        receptive_field_active = 1'b1;
-                    end
-                end
-            end
-        end
-    endfunction
 
     /*
      * tau 固定为 2，因此泄露积分用算术右移 1 位实现。
@@ -310,15 +256,12 @@ module conv_lif_layer_sparse #(
     end
 
     /*
-     * 每个时间步启动时锁存输入脉冲图和 current 有效位图，保证处理过程中输入稳定。
-     * 当前 sparse 扫描只使用 current 有效位图，输入脉冲图保留给兼容和后续调试。
+     * 每个时间步启动时锁存 current 有效位图，保证处理过程中输入稳定。
      */
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            latched_input_spikes_reg <= {P_NUM_INPUT_PIXELS{1'b0}};
             latched_current_valid_bitmap_reg <= {P_NUM_NEURONS{1'b0}};
         end else if (current_state_reg == S_IDLE && next_state_reg == S_PROCESSING) begin
-            latched_input_spikes_reg <= i_input_spike_vector;
             latched_current_valid_bitmap_reg <= i_current_valid_bitmap;
         end else if (current_state_reg == S_DONE) begin
             latched_current_valid_bitmap_reg <= {P_NUM_NEURONS{1'b0}};

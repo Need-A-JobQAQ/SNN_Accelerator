@@ -15,6 +15,7 @@ module conv_lif_sparse_core #(
     input wire rst_n,
     input wire i_enable_core,
     input wire [P_NUM_INPUT_PIXELS-1:0] i_input_spike_vector,
+    input wire [P_CORE_NUM_NEURONS-1:0] i_current_valid_bitmap,
     input wire signed [P_GLOBAL_NUM_NEURONS-1:0][P_NEURON_VALUE_TOTAL_BITS-1:0] i_all_currents_I,
 
     output reg [P_CORE_NUM_NEURONS-1:0] o_core_spikes_out,
@@ -23,7 +24,8 @@ module conv_lif_sparse_core #(
     output reg [$clog2(P_GLOBAL_NUM_NEURONS)-1:0] o_event_addr,
     output wire o_core_ready,
     output reg [31:0] o_skip_count,
-    output reg [31:0] o_update_count
+    output reg [31:0] o_update_count,
+    output reg [31:0] o_event_count
 );
 
     /*
@@ -33,7 +35,6 @@ module conv_lif_sparse_core #(
      */
     localparam LP_LOCAL_ADDR_WIDTH = $clog2(P_CORE_NUM_NEURONS);
     localparam LP_GLOBAL_ADDR_WIDTH = $clog2(P_GLOBAL_NUM_NEURONS);
-    localparam LP_COUNT_WIDTH = $clog2(P_CORE_NUM_NEURONS + 1);
     localparam BRAM_READ_LATENCY = 1;
 
     localparam signed [P_NEURON_VALUE_TOTAL_BITS-1:0] LP_V_THRESHOLD_FIXED =
@@ -54,10 +55,9 @@ module conv_lif_sparse_core #(
     reg [2:0] current_state_reg;
     reg [2:0] next_state_reg;
 
-    reg [P_NUM_INPUT_PIXELS-1:0] latched_input_spikes_reg;
+    reg [P_CORE_NUM_NEURONS-1:0] latched_current_valid_bitmap_reg;
     reg [P_CORE_NUM_NEURONS-1:0] active_state_bitmap_reg;
     reg [LP_LOCAL_ADDR_WIDTH-1:0] clear_addr_reg;
-    reg [LP_COUNT_WIDTH-1:0] issued_addr_count_reg;
     reg [LP_LOCAL_ADDR_WIDTH-1:0] addr_pipeline_reg [BRAM_READ_LATENCY-1:0];
     reg valid_pipeline_reg [BRAM_READ_LATENCY-1:0];
     reg pipeline_busy_comb;
@@ -65,10 +65,18 @@ module conv_lif_sparse_core #(
     wire scan_addr_valid_w;
     wire [LP_LOCAL_ADDR_WIDTH-1:0] scan_local_addr_w;
     wire [LP_GLOBAL_ADDR_WIDTH-1:0] scan_global_addr_w;
-    wire scan_rf_active_w;
-    wire scan_state_active_w;
+    wire scan_current_valid_w;
     wire scan_need_update_w;
     wire pipeline_busy_w;
+    wire [P_CORE_NUM_NEURONS-1:0] active_bitmap_start_w;
+
+    wire compactor_start_w;
+    wire compactor_addr_ready_w;
+    wire compactor_addr_valid_w;
+    wire [LP_LOCAL_ADDR_WIDTH-1:0] compactor_addr_w;
+    wire compactor_done_w;
+    wire compactor_busy_w;
+    wire [31:0] compactor_active_count_w;
 
     wire clear_membrane_en_w;
     wire membrane_ram_write_en_w;
@@ -95,13 +103,14 @@ module conv_lif_sparse_core #(
     integer busy_idx;
 
     assign o_core_ready = (current_state_reg == S_IDLE);
-    assign scan_addr_valid_w = (current_state_reg == S_PROCESSING) &&
-                               (issued_addr_count_reg < P_CORE_NUM_NEURONS);
-    assign scan_local_addr_w = issued_addr_count_reg[LP_LOCAL_ADDR_WIDTH-1:0];
+    assign active_bitmap_start_w = i_current_valid_bitmap | active_state_bitmap_reg;
+    assign compactor_start_w = (current_state_reg == S_IDLE) && (next_state_reg == S_PROCESSING);
+    assign compactor_addr_ready_w = (current_state_reg == S_PROCESSING);
+    assign scan_addr_valid_w = (current_state_reg == S_PROCESSING) && compactor_addr_valid_w;
+    assign scan_local_addr_w = compactor_addr_w;
     assign scan_global_addr_w = P_CORE_START_ADDR + scan_local_addr_w;
-    assign scan_rf_active_w = receptive_field_active(latched_input_spikes_reg, scan_global_addr_w);
-    assign scan_state_active_w = active_state_bitmap_reg[scan_local_addr_w];
-    assign scan_need_update_w = scan_addr_valid_w && (scan_rf_active_w || scan_state_active_w);
+    assign scan_current_valid_w = latched_current_valid_bitmap_reg[scan_local_addr_w];
+    assign scan_need_update_w = scan_addr_valid_w;
 
     assign pipeline_busy_w = pipeline_busy_comb;
     assign process_local_addr_w = addr_pipeline_reg[BRAM_READ_LATENCY-1];
@@ -132,48 +141,26 @@ module conv_lif_sparse_core #(
         .o_read_data    (membrane_ram_read_data_w)
     );
 
-    function get_input_spike;
-        input [P_NUM_INPUT_PIXELS-1:0] spikes;
-        input integer row;
-        input integer col;
-        integer flat_idx;
-        begin
-            if (row < 0 || row >= P_INPUT_HEIGHT || col < 0 || col >= P_INPUT_WIDTH) begin
-                get_input_spike = 1'b0;
-            end else begin
-                flat_idx = (row * P_INPUT_WIDTH) + col;
-                get_input_spike = spikes[P_NUM_INPUT_PIXELS - 1 - flat_idx];
-            end
-        end
-    endfunction
-
-    function receptive_field_active;
-        input [P_NUM_INPUT_PIXELS-1:0] spikes;
-        input [LP_GLOBAL_ADDR_WIDTH-1:0] global_addr;
-        integer local_addr;
-        integer spatial_idx;
-        integer out_row;
-        integer out_col;
-        integer kernel_row;
-        integer kernel_col;
-        begin
-            receptive_field_active = 1'b0;
-            local_addr = global_addr % P_NUM_INPUT_PIXELS;
-            spatial_idx = P_NUM_INPUT_PIXELS - 1 - local_addr;
-            out_row = spatial_idx / P_INPUT_WIDTH;
-            out_col = spatial_idx % P_INPUT_WIDTH;
-
-            for (kernel_row = 0; kernel_row < P_KERNEL_SIZE; kernel_row = kernel_row + 1) begin
-                for (kernel_col = 0; kernel_col < P_KERNEL_SIZE; kernel_col = kernel_col + 1) begin
-                    if (get_input_spike(spikes,
-                                        out_row + kernel_row - P_PADDING,
-                                        out_col + kernel_col - P_PADDING)) begin
-                        receptive_field_active = 1'b1;
-                    end
-                end
-            end
-        end
-    endfunction
+    /*
+     * 本 core 只把需要更新的本地地址压缩成地址流。
+     * current_valid_bitmap 表示本时间步有输入电流的地址；
+     * active_state_bitmap_reg 表示上一时间步后膜电位仍不可忽略的地址。
+     */
+    bitmap_to_addr_stream #(
+        .P_BITMAP_WIDTH  (P_CORE_NUM_NEURONS),
+        .P_ADDR_WIDTH    (LP_LOCAL_ADDR_WIDTH)
+    ) u_active_bitmap_compactor (
+        .clk             (clk),
+        .rst_n           (rst_n),
+        .i_start         (compactor_start_w),
+        .i_active_bitmap (active_bitmap_start_w),
+        .i_addr_ready    (compactor_addr_ready_w),
+        .o_addr_valid    (compactor_addr_valid_w),
+        .o_addr          (compactor_addr_w),
+        .o_done          (compactor_done_w),
+        .o_busy          (compactor_busy_w),
+        .o_active_count  (compactor_active_count_w)
+    );
 
     assign process_diff_w = process_input_current_w - process_membrane_w;
     assign process_delta_w = process_diff_w >>> 1;
@@ -206,7 +193,7 @@ module conv_lif_sparse_core #(
                 end
             end
             S_PROCESSING: begin
-                if (issued_addr_count_reg == P_CORE_NUM_NEURONS) begin
+                if (compactor_done_w) begin
                     next_state_reg = S_FLUSHING;
                 end
             end
@@ -246,22 +233,22 @@ module conv_lif_sparse_core #(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            latched_input_spikes_reg <= {P_NUM_INPUT_PIXELS{1'b0}};
+            latched_current_valid_bitmap_reg <= {P_CORE_NUM_NEURONS{1'b0}};
         end else if (current_state_reg == S_IDLE && next_state_reg == S_PROCESSING) begin
-            latched_input_spikes_reg <= i_input_spike_vector;
+            latched_current_valid_bitmap_reg <= i_current_valid_bitmap;
+        end else if (current_state_reg == S_DONE) begin
+            latched_current_valid_bitmap_reg <= {P_CORE_NUM_NEURONS{1'b0}};
         end
     end
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            issued_addr_count_reg <= {LP_COUNT_WIDTH{1'b0}};
             for (pipe_idx = 0; pipe_idx < BRAM_READ_LATENCY; pipe_idx = pipe_idx + 1) begin
                 addr_pipeline_reg[pipe_idx] <= {LP_LOCAL_ADDR_WIDTH{1'b0}};
                 valid_pipeline_reg[pipe_idx] <= 1'b0;
             end
         end else begin
             if (current_state_reg == S_IDLE && next_state_reg == S_PROCESSING) begin
-                issued_addr_count_reg <= {LP_COUNT_WIDTH{1'b0}};
                 for (pipe_idx = 0; pipe_idx < BRAM_READ_LATENCY; pipe_idx = pipe_idx + 1) begin
                     addr_pipeline_reg[pipe_idx] <= {LP_LOCAL_ADDR_WIDTH{1'b0}};
                     valid_pipeline_reg[pipe_idx] <= 1'b0;
@@ -277,10 +264,6 @@ module conv_lif_sparse_core #(
                     addr_pipeline_reg[0] <= scan_local_addr_w;
                 end else begin
                     addr_pipeline_reg[0] <= {LP_LOCAL_ADDR_WIDTH{1'b0}};
-                end
-
-                if (scan_addr_valid_w) begin
-                    issued_addr_count_reg <= issued_addr_count_reg + 1'b1;
                 end
             end
         end
@@ -303,6 +286,7 @@ module conv_lif_sparse_core #(
             o_event_addr <= {LP_GLOBAL_ADDR_WIDTH{1'b0}};
             o_skip_count <= 32'd0;
             o_update_count <= 32'd0;
+            o_event_count <= 32'd0;
         end else begin
             o_event_valid <= 1'b0;
             if (current_state_reg == S_IDLE && next_state_reg == S_PROCESSING) begin
@@ -310,9 +294,10 @@ module conv_lif_sparse_core #(
                 o_event_addr <= {LP_GLOBAL_ADDR_WIDTH{1'b0}};
                 o_skip_count <= 32'd0;
                 o_update_count <= 32'd0;
+                o_event_count <= 32'd0;
             end else begin
-                if (scan_addr_valid_w && !scan_need_update_w) begin
-                    o_skip_count <= o_skip_count + 1'b1;
+                if (compactor_done_w) begin
+                    o_skip_count <= P_CORE_NUM_NEURONS - compactor_active_count_w;
                 end
 
                 if (lif_membrane_write_en_w) begin
@@ -321,6 +306,7 @@ module conv_lif_sparse_core #(
                         o_core_spikes_out[process_local_addr_w] <= 1'b1;
                         o_event_valid <= 1'b1;
                         o_event_addr <= process_event_addr_w;
+                        o_event_count <= o_event_count + 1'b1;
                     end else begin
                         o_core_spikes_out[process_local_addr_w] <= 1'b0;
                     end

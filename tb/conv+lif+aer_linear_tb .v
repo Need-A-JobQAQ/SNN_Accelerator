@@ -2,7 +2,7 @@
 
 module conv_lif_aer_tb();
 
-    localparam CLK_PERIOD = 10 ; // 时钟周期：100MHz
+    localparam CLK_PERIOD = 10 ; // 时钟周期�?100MHz
 
     localparam P_INPUT_HEIGHT = 28;
     localparam P_INPUT_WIDTH = 28;
@@ -29,14 +29,14 @@ module conv_lif_aer_tb();
     localparam P_WEIGHT_BRAM_DATA_WIDTH = 64            ;//added for aer_linear module
     localparam P_WEIGHT_BRAM_EFFECTIVE_DEPTH = 392      ;//
     localparam P_NUM_OUTPUT_NEURONS = 10                ;//
-    localparam P_USE_MULTICORE_CONV_LIF = 0             ;// 保留参数，当前 TB 使用 P_FORCE_MULTICORE_CONV_LIF 控制
-    localparam P_NUM_CONV_LIF_CORES = 4                 ;// 多 core 版本的 core 数量
+    localparam P_USE_MULTICORE_CONV_LIF = 0             ;// 保留参数，当�? TB 使用 P_FORCE_MULTICORE_CONV_LIF 控制
+    localparam P_NUM_CONV_LIF_CORES = 4                 ;// �? core 版本�? core 数量
     localparam P_CORE_EVENT_FIFO_DEPTH = 512            ;// 每个 core 本地 AER FIFO 深度
     localparam P_CORE_FIFO_COUNT_WIDTH = $clog2(P_CORE_EVENT_FIFO_DEPTH + 1);
-    localparam P_FORCE_MULTICORE_CONV_LIF = 0           ;// 本 TB 默认强制启用多 core 路径
-    localparam P_AER_ARB_POLICY = 1                     ;// 0:固定优先级 1:轮询 2:FIFO负载感知
-    localparam P_USE_SPARSE_CONV_LIF = 1                ;// 1:使用单核稀疏跳过卷积 LIF；0:使用原始卷积 LIF
-    localparam P_USE_STATIC_MASK = 0                    ;// 1:使用静态 mask AER 全连接；0:使用原始 AER 全连接
+    localparam P_FORCE_MULTICORE_CONV_LIF = 1           ;// �? TB 默认强制启用�? core 路径
+    localparam P_AER_ARB_POLICY = 1                     ;// 0:固定优先�? 1:轮询 2:FIFO负载感知
+    localparam P_USE_SPARSE_CONV_LIF = 0                ;// 1:使用单核�?疏跳过卷�? LIF�?0:使用原始卷积 LIF
+    localparam P_USE_STATIC_MASK = 0                    ;// 1:使用静�?? mask AER 全连接；0:使用原始 AER 全连�?
     
     reg tb_clk                     ; 
     reg tb_rst_n                   ;
@@ -45,7 +45,7 @@ module conv_lif_aer_tb();
 
     wire signed [P_NUM_OUTPUT_CHANNELS * P_NUM_INPUT_PIXELS - 1:0][P_NEURON_VALUE_TOTAL_BITS-1:0] 
           w_all_currents_I         ; //
-    wire  w_all_currents_valid     ; //妯″潡闂村唴閮ㄤ俊鍙?
+    wire  w_all_currents_valid     ; //妯�?�潡闂村唴閮ㄤ俊�??
     wire w_current_ram_ready                            ;
     wire w_current_ram_rd_en                            ;
     wire [LP_CONV_AER_ADDR_WIDTH-1:0] w_current_ram_rd_addr;
@@ -61,6 +61,7 @@ module conv_lif_aer_tb();
     wire [31:0] w_conv_lif_skip_count                   ;
     wire [31:0] w_conv_lif_update_count                 ;
     wire [P_NUM_CONV_LIF_CORES-1:0][P_CORE_FIFO_COUNT_WIDTH-1:0] w_conv_lif_core_fifo_count;
+    wire [P_NUM_CONV_LIF_CORES-1:0][31:0] w_conv_lif_core_event_count;
     wire [P_NUM_CONV_LIF_CORES-1:0][P_CORE_FIFO_COUNT_WIDTH-1:0] w_conv_lif_core_fifo_max_count;
     wire w_conv_lif_core_fifo_overflow                  ;
     wire w_fifo_event_valid                             ;
@@ -123,7 +124,7 @@ module conv_lif_aer_tb();
                 r_enable_layer_pending <= 1'b1;
             end
 
-            // 卷积结果可用后先暂存请求，等卷积后 LIF 清零完成并 ready 后再启动。
+            // 卷积结果可用后先暂存请求，等卷积�? LIF 清零完成�? ready 后再启动�?
             if (r_enable_layer_pending && w_conv_lif_layer_ready) begin
                 r_enable_layer <= 1'b1;
                 r_enable_layer_pending <= 1'b0;
@@ -132,9 +133,9 @@ module conv_lif_aer_tb();
     end
 
     /*
-     * 卷积后 LIF 层可选：
-     * multicore 路径仍使用兼容的完整电流数组；
-     * 单核 sparse 路径通过 current RAM 读口按需读取卷积电流。
+     * 卷积�? LIF 层可选：
+     * multicore 路径仍使用兼容的完整电流数组�?
+     * 单核 sparse 路径通过 current RAM 读口按需读取卷积电流�?
      */
     generate
         if (P_FORCE_MULTICORE_CONV_LIF) begin : gen_multicore_conv_lif
@@ -158,6 +159,7 @@ module conv_lif_aer_tb();
                 .rst_n                           (tb_rst_n),
                 .i_enable_layer                  (r_enable_layer),
                 .i_input_spike_vector            (tb_input_spike_vector),
+                .i_current_valid_bitmap         (w_current_valid_bitmap),
                 .i_all_currents_I                (w_all_currents_I),
                 .o_all_spikes_out                (w_all_spikes_out),
                 .o_all_spikes_valid              (w_all_spikes_valid),
@@ -167,6 +169,7 @@ module conv_lif_aer_tb();
                 .o_layer_ready                   (w_conv_lif_layer_ready),
                 .o_skip_count                    (w_conv_lif_skip_count),
                 .o_update_count                  (w_conv_lif_update_count),
+                .o_core_event_count             (w_conv_lif_core_event_count),
                 .o_core_fifo_count               (w_conv_lif_core_fifo_count),
                 .o_core_fifo_max_count           (w_conv_lif_core_fifo_max_count),
                 .o_core_fifo_overflow            (w_conv_lif_core_fifo_overflow)
@@ -206,6 +209,7 @@ module conv_lif_aer_tb();
                 .o_update_count                  (w_conv_lif_update_count)
             );
 
+            assign w_conv_lif_core_event_count = {P_NUM_CONV_LIF_CORES * 32{1'b0}};
             assign w_conv_lif_core_fifo_count = {P_NUM_CONV_LIF_CORES * P_CORE_FIFO_COUNT_WIDTH{1'b0}};
             assign w_conv_lif_core_fifo_max_count = {P_NUM_CONV_LIF_CORES * P_CORE_FIFO_COUNT_WIDTH{1'b0}};
             assign w_conv_lif_core_fifo_overflow = 1'b0;
@@ -229,6 +233,7 @@ module conv_lif_aer_tb();
 
             assign w_conv_lif_skip_count = 32'd0;
             assign w_conv_lif_update_count = w_all_spikes_valid ? P_NUM_NEURONS : 32'd0;
+            assign w_conv_lif_core_event_count = {P_NUM_CONV_LIF_CORES * 32{1'b0}};
             assign w_conv_lif_core_fifo_count = {P_NUM_CONV_LIF_CORES * P_CORE_FIFO_COUNT_WIDTH{1'b0}};
             assign w_conv_lif_core_fifo_max_count = {P_NUM_CONV_LIF_CORES * P_CORE_FIFO_COUNT_WIDTH{1'b0}};
             assign w_conv_lif_core_fifo_overflow = 1'b0;
@@ -271,9 +276,9 @@ module conv_lif_aer_tb();
     end
 
     /*
-     * AER 全连接层可选：
+     * AER 全连接层可�?�：
      * P_USE_STATIC_MASK=0 使用原始 dense AER 全连接；
-     * P_USE_STATIC_MASK=1 使用带静态剪枝 mask 的 AER 全连接。
+     * P_USE_STATIC_MASK=1 使用带静态剪�? mask �? AER 全连接�??
      */
     generate
         if (P_USE_STATIC_MASK) begin : gen_masked_aer_linear
@@ -359,29 +364,29 @@ module conv_lif_aer_tb();
                                  28'b0000000000000000000000000000,
                                  28'b0000000000000000000000000000,
                                  28'b0000000000000000000000000000,
-                                 28'b0000000000000000010100000000,
-                                 28'b0000000000000000100111100000,
-                                 28'b0000000000000111000111110000,
-                                 28'b0000000000111110000111000000,
-                                 28'b0000000011111000011100000000,
-                                 28'b0000000011000001111000000000,
-                                 28'b0000001110000001111000000000,
-                                 28'b0000000111000011100000000000,
-                                 28'b0000000111100110000000000000,
-                                 28'b0000000011111111000000000000,
-                                 28'b0000000000101111010000000000,
-                                 28'b0000000000011011110000000000,
-                                 28'b0000000000111100011000000000,
-                                 28'b0000000000011000001110000000,
-                                 28'b0000000000111000000100000000,
+                                 28'b0000000000000000000010000000,
+                                 28'b0000000000000111110111110000,
+                                 28'b0000000000001111000111100000,
+                                 28'b0000000001111110001110000000,
+                                 28'b0000000011111000001110000000,
+                                 28'b0000000011000000111000000000,
+                                 28'b0000000011000001100000000000,
+                                 28'b0000000110000011100000000000,
+                                 28'b0000000111101111000000000000,
+                                 28'b0000000011111110000000000000,
+                                 28'b0000000001011111000000000000,
+                                 28'b0000000000011111111000000000,
+                                 28'b0000000000011000011000000000,
+                                 28'b0000000000011000000100000000,
                                  28'b0000000000111000000110000000,
-                                 28'b0000000000011100000100000000,
-                                 28'b0000000000011100011100000000,
-                                 28'b0000000000000110111100000000,
-                                 28'b0000000000000011000000000000,
+                                 28'b0000000000111000001100000000,
+                                 28'b0000000000011000000100000000,
+                                 28'b0000000000001100011100000000,
+                                 28'b0000000000001110111000000000,
+                                 28'b0000000000000111110000000000,
                                  28'b0000000000000000000000000000,
                                  28'b0000000000000000000000000000,
-                                 28'b0000000000000000000000000000};     // 脚本 aer_linear_output_tb.py 生成的第 0 时间步输入点阵?
+                                 28'b0000000000000000000000000000};     // 脚本 aer_linear_output_tb.py 生成的第 0 时间步输入点�??
 
         $display("[%0t ns] SIM_INFO: input vector is READY!!!.", $time);
         repeat(2) @(posedge tb_clk);
@@ -400,11 +405,15 @@ module conv_lif_aer_tb();
         $display("SIM_INFO: core_fifo_max_count={%0d,%0d,%0d,%0d}",
                  w_conv_lif_core_fifo_max_count[3], w_conv_lif_core_fifo_max_count[2],
                  w_conv_lif_core_fifo_max_count[1], w_conv_lif_core_fifo_max_count[0]);
+        $display("SIM_INFO: core_event_count={%0d,%0d,%0d,%0d}",
+                 w_conv_lif_core_event_count[3], w_conv_lif_core_event_count[2],
+                 w_conv_lif_core_event_count[1], w_conv_lif_core_event_count[0]);
         #50;
         $finish;
 
     end
 
 endmodule
+
 
 

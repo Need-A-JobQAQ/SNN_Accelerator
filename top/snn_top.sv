@@ -86,6 +86,7 @@ module snn_top #(
     wire conv_lif_event_frame_done;
     wire [31:0] conv_lif_skip_count;
     wire [31:0] conv_lif_update_count;
+    wire [3:0][31:0] conv_lif_core_event_count;
     wire [3:0][LP_CORE_FIFO_COUNT_WIDTH-1:0] conv_lif_core_fifo_count;
     wire [3:0][LP_CORE_FIFO_COUNT_WIDTH-1:0] conv_lif_core_fifo_max_count;
     wire [LP_CORE_FIFO_COUNT_WIDTH-1:0] conv_lif_core_fifo_max_count_w;
@@ -279,6 +280,7 @@ module snn_top #(
                 .rst_n                  (rst_n),
                 .i_enable_layer         (conv_lif_actual_enable_r),
                 .i_input_spike_vector   (encoded_spikes),
+                .i_current_valid_bitmap (conv_current_valid_bitmap),
                 .i_all_currents_I       (conv_currents),
                 .o_all_spikes_out       (conv_lif_output_spikes),
                 .o_all_spikes_valid     (conv_lif_spikes_valid),
@@ -288,6 +290,7 @@ module snn_top #(
                 .o_layer_ready          (conv_lif_layer_ready),
                 .o_skip_count           (conv_lif_skip_count),
                 .o_update_count         (conv_lif_update_count),
+                .o_core_event_count     (conv_lif_core_event_count),
                 .o_core_fifo_count      (conv_lif_core_fifo_count),
                 .o_core_fifo_max_count  (conv_lif_core_fifo_max_count),
                 .o_core_fifo_overflow   (conv_lif_core_fifo_overflow)
@@ -328,6 +331,7 @@ module snn_top #(
             );
 
             assign conv_lif_core_fifo_overflow = 1'b0;
+            assign conv_lif_core_event_count = {4 * 32{1'b0}};
             assign conv_lif_core_fifo_count = {4 * LP_CORE_FIFO_COUNT_WIDTH{1'b0}};
             assign conv_lif_core_fifo_max_count = {4 * LP_CORE_FIFO_COUNT_WIDTH{1'b0}};
         end else begin : gen_dense_conv_lif
@@ -351,6 +355,7 @@ module snn_top #(
             assign conv_lif_skip_count = 32'd0;
             assign conv_lif_update_count = conv_lif_spikes_valid ? LP_NUM_CONV_FEATURES_32 : 32'd0;
             assign conv_lif_core_fifo_overflow = 1'b0;
+            assign conv_lif_core_event_count = {4 * 32{1'b0}};
             assign conv_lif_core_fifo_count = {4 * LP_CORE_FIFO_COUNT_WIDTH{1'b0}};
             assign conv_lif_core_fifo_max_count = {4 * LP_CORE_FIFO_COUNT_WIDTH{1'b0}};
             assign conv_current_ram_rd_en = 1'b0;
