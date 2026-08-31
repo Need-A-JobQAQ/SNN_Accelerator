@@ -22,6 +22,14 @@ module conv_layer_parallel #(
     input wire [$clog2(P_NUM_OUTPUT_CHANNELS * P_NUM_INPUT_PIXELS)-1:0] i_current_rd_addr,
     output reg signed [P_NEURON_VALUE_TOTAL_BITS-1:0] o_current_rd_data,
     output reg o_current_rd_valid,
+    input wire i_current_ch0_rd_en,
+    input wire [$clog2(P_NUM_INPUT_PIXELS)-1:0] i_current_ch0_rd_addr,
+    output wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] o_current_ch0_rd_data,
+    output reg o_current_ch0_rd_valid,
+    input wire i_current_ch1_rd_en,
+    input wire [$clog2(P_NUM_INPUT_PIXELS)-1:0] i_current_ch1_rd_addr,
+    output wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] o_current_ch1_rd_data,
+    output reg o_current_ch1_rd_valid,
     output reg o_current_ram_ready,
     output reg [P_NUM_OUTPUT_CHANNELS * P_NUM_INPUT_PIXELS - 1:0] o_current_valid_bitmap,
 
@@ -83,12 +91,20 @@ module conv_layer_parallel #(
         (i_current_rd_addr - P_NUM_INPUT_PIXELS[LP_TOTAL_ADDR_WIDTH-1:0]) :
         i_current_rd_addr[LP_ADDR_WIDTH-1:0];
 
-    assign ch0_ram_read_en_w = compat_read_en_w || (i_current_rd_en && !external_read_ch1_w);
-    assign ch1_ram_read_en_w = compat_read_en_w || (i_current_rd_en && external_read_ch1_w);
+    assign ch0_ram_read_en_w = compat_read_en_w ||
+                               i_current_ch0_rd_en ||
+                               (i_current_rd_en && !external_read_ch1_w);
+    assign ch1_ram_read_en_w = compat_read_en_w ||
+                               i_current_ch1_rd_en ||
+                               (i_current_rd_en && external_read_ch1_w);
     assign ch0_ram_read_addr_w = compat_read_en_w ?
-        read_issue_count_reg[LP_ADDR_WIDTH-1:0] : external_read_local_addr_w;
+        read_issue_count_reg[LP_ADDR_WIDTH-1:0] :
+        (i_current_ch0_rd_en ? i_current_ch0_rd_addr : external_read_local_addr_w);
     assign ch1_ram_read_addr_w = compat_read_en_w ?
-        read_issue_count_reg[LP_ADDR_WIDTH-1:0] : external_read_local_addr_w;
+        read_issue_count_reg[LP_ADDR_WIDTH-1:0] :
+        (i_current_ch1_rd_en ? i_current_ch1_rd_addr : external_read_local_addr_w);
+    assign o_current_ch0_rd_data = ch0_ram_read_data_w;
+    assign o_current_ch1_rd_data = ch1_ram_read_data_w;
 
     conv_pe #(
         .P_INPUT_HEIGHT             (P_INPUT_HEIGHT),
@@ -293,6 +309,20 @@ module conv_layer_parallel #(
             if (i_current_rd_en) begin
                 external_read_ch1_dly_reg <= external_read_ch1_w;
             end
+        end
+    end
+
+    /*
+     * 双 bank 外部读有效信号。
+     * ch0/ch1 current RAM 是同步读，读使能后一拍数据有效。
+     */
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            o_current_ch0_rd_valid <= 1'b0;
+            o_current_ch1_rd_valid <= 1'b0;
+        end else begin
+            o_current_ch0_rd_valid <= i_current_ch0_rd_en;
+            o_current_ch1_rd_valid <= i_current_ch1_rd_en;
         end
     end
 

@@ -2,7 +2,7 @@
 
 module conv_layer_tb;
 
-    localparam CLK_PERIOD = 10; // 时钟周期�?100MHz
+    localparam CLK_PERIOD = 10; // 时钟周期�?100MHz
 
     localparam P_INPUT_HEIGHT = 28;
     localparam P_INPUT_WIDTH = 28;
@@ -69,6 +69,20 @@ module conv_layer_tb;
         .rst_n                       (tb_rst_n)                  ,
         .i_calc_start                (tb_calc_start)             ,
         .i_input_spike_vector        (tb_input_spike_vector)     ,
+        .i_current_rd_en            (1'b0),
+        .i_current_rd_addr          ({($clog2(P_NUM_OUTPUT_CHANNELS * P_NUM_INPUT_PIXELS)){1'b0}}),
+        .o_current_rd_data          (),
+        .o_current_rd_valid         (),
+        .i_current_ch0_rd_en        (1'b0),
+        .i_current_ch0_rd_addr      ({($clog2(P_NUM_INPUT_PIXELS)){1'b0}}),
+        .o_current_ch0_rd_data      (),
+        .o_current_ch0_rd_valid     (),
+        .i_current_ch1_rd_en        (1'b0),
+        .i_current_ch1_rd_addr      ({($clog2(P_NUM_INPUT_PIXELS)){1'b0}}),
+        .o_current_ch1_rd_data      (),
+        .o_current_ch1_rd_valid     (),
+        .o_current_ram_ready        (),
+        .o_current_valid_bitmap     (),
 
         .o_all_currents_I            (tb_parallel_all_currents_I),
         .o_all_currents_valid        (tb_parallel_all_currents_valid)

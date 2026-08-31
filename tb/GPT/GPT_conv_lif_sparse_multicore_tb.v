@@ -48,6 +48,14 @@ module GPT_conv_lif_sparse_multicore_tb;
     wire [P_NUM_CORES-1:0][31:0] multi_core_event_count;
     wire [P_NUM_CORES-1:0][$clog2(16 + 1)-1:0] multi_core_fifo_max_count;
     wire multi_fifo_overflow;
+    wire multi_current_ch0_rd_en;
+    wire [$clog2(P_NUM_INPUT_PIXELS)-1:0] multi_current_ch0_rd_addr;
+    reg signed [P_NEURON_VALUE_TOTAL_BITS-1:0] multi_current_ch0_rd_data;
+    reg multi_current_ch0_rd_valid;
+    wire multi_current_ch1_rd_en;
+    wire [$clog2(P_NUM_INPUT_PIXELS)-1:0] multi_current_ch1_rd_addr;
+    reg signed [P_NEURON_VALUE_TOTAL_BITS-1:0] multi_current_ch1_rd_data;
+    reg multi_current_ch1_rd_valid;
 
     integer idx;
     integer timeout_count;
@@ -106,6 +114,14 @@ module GPT_conv_lif_sparse_multicore_tb;
         .i_input_spike_vector   (input_spikes),
         .i_current_valid_bitmap (current_valid_bitmap),
         .i_all_currents_I       (currents),
+        .i_current_ch0_rd_data  (multi_current_ch0_rd_data),
+        .i_current_ch0_rd_valid (multi_current_ch0_rd_valid),
+        .i_current_ch1_rd_data  (multi_current_ch1_rd_data),
+        .i_current_ch1_rd_valid (multi_current_ch1_rd_valid),
+        .o_current_ch0_rd_en    (multi_current_ch0_rd_en),
+        .o_current_ch0_rd_addr  (multi_current_ch0_rd_addr),
+        .o_current_ch1_rd_en    (multi_current_ch1_rd_en),
+        .o_current_ch1_rd_addr  (multi_current_ch1_rd_addr),
         .o_all_spikes_out       (multi_spikes),
         .o_all_spikes_valid     (multi_valid),
         .o_event_valid          (multi_event_valid),
@@ -123,6 +139,24 @@ module GPT_conv_lif_sparse_multicore_tb;
     initial begin
         clk = 1'b0;
         forever #5 clk = ~clk;
+    end
+
+    /*
+     * multicore ???????? current RAM bank ????
+     * ??????????? conv_layer_parallel ? ch0/ch1 ???
+     */
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            multi_current_ch0_rd_valid <= 1'b0;
+            multi_current_ch0_rd_data <= {P_NEURON_VALUE_TOTAL_BITS{1'b0}};
+            multi_current_ch1_rd_valid <= 1'b0;
+            multi_current_ch1_rd_data <= {P_NEURON_VALUE_TOTAL_BITS{1'b0}};
+        end else begin
+            multi_current_ch0_rd_valid <= multi_current_ch0_rd_en;
+            multi_current_ch0_rd_data <= currents[multi_current_ch0_rd_addr];
+            multi_current_ch1_rd_valid <= multi_current_ch1_rd_en;
+            multi_current_ch1_rd_data <= currents[P_NUM_INPUT_PIXELS + multi_current_ch1_rd_addr];
+        end
     end
 
     task clear_inputs;
@@ -231,6 +265,7 @@ module GPT_conv_lif_sparse_multicore_tb;
     end
 
 endmodule
+
 
 
 

@@ -1,31 +1,50 @@
 module conv_lif_sparse_core #(
-    parameter P_GLOBAL_NUM_NEURONS = 1568,
-    parameter P_CORE_START_ADDR = 0,
-    parameter P_CORE_NUM_NEURONS = 392,
-    parameter P_NUM_INPUT_PIXELS = 784,
-    parameter P_INPUT_HEIGHT = 28,
-    parameter P_INPUT_WIDTH = 28,
-    parameter P_KERNEL_SIZE = 3,
-    parameter P_PADDING = 1,
+    parameter P_GLOBAL_NUM_NEURONS      = 1568,
+    parameter P_CORE_START_ADDR         = 0,
+    parameter P_CORE_NUM_NEURONS        = 392,
+    parameter P_NUM_INPUT_PIXELS        = 784,
+    parameter P_INPUT_HEIGHT            = 28,
+    parameter P_INPUT_WIDTH             = 28,
+    parameter P_KERNEL_SIZE             = 3,
+    parameter P_PADDING                 = 1,
     parameter P_NEURON_VALUE_TOTAL_BITS = 26,
-    parameter P_NEURON_VALUE_FRAC_BITS = 12,
-    parameter P_SKIP_THRESHOLD_SHIFT = 5
+    parameter P_NEURON_VALUE_FRAC_BITS  = 12,
+    parameter P_SKIP_THRESHOLD_SHIFT    = 5,
+    parameter P_USE_CURRENT_RAM_INPUT   = 0
 ) (
-    input wire clk,
-    input wire rst_n,
-    input wire i_enable_core,
-    input wire [P_NUM_INPUT_PIXELS-1:0] i_input_spike_vector,
-    input wire [P_CORE_NUM_NEURONS-1:0] i_current_valid_bitmap,
-    input wire signed [P_GLOBAL_NUM_NEURONS-1:0][P_NEURON_VALUE_TOTAL_BITS-1:0] i_all_currents_I,
+    // 时钟、复位和启动控制
+    input  wire                                                   clk,
+    input  wire                                                   rst_n,
+    input  wire                                                   i_enable_core,
 
-    output reg [P_CORE_NUM_NEURONS-1:0] o_core_spikes_out,
-    output reg o_core_done,
-    output reg o_event_valid,
-    output reg [$clog2(P_GLOBAL_NUM_NEURONS)-1:0] o_event_addr,
-    output wire o_core_ready,
-    output reg [31:0] o_skip_count,
-    output reg [31:0] o_update_count,
-    output reg [31:0] o_event_count
+    // 本 core 的稀疏调度输入
+    input  wire [P_NUM_INPUT_PIXELS-1:0]                          i_input_spike_vector,
+    input  wire [P_CORE_NUM_NEURONS-1:0]                          i_current_valid_bitmap,
+
+    // 兼容旧版本的完整电流数组输入；P_USE_CURRENT_RAM_INPUT=0 时使用
+    input  wire signed [P_GLOBAL_NUM_NEURONS-1:0][P_NEURON_VALUE_TOTAL_BITS-1:0]
+                                                                  i_all_currents_I,
+
+    // 外部 current RAM 读通道；P_USE_CURRENT_RAM_INPUT=1 时使用
+    input  wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0]            i_current_rd_data,
+    input  wire                                                   i_current_rd_valid,
+    input  wire                                                   i_current_rd_ready,
+    output wire                                                   o_current_rd_en,
+    output wire [$clog2(P_GLOBAL_NUM_NEURONS)-1:0]                o_current_rd_addr,
+
+    // 本 core 输出的脉冲结果和运行状态
+    output reg  [P_CORE_NUM_NEURONS-1:0]                          o_core_spikes_out,
+    output reg                                                    o_core_done,
+    output wire                                                   o_core_ready,
+
+    // 本 core 产生的 AER 事件
+    output reg                                                    o_event_valid,
+    output reg  [$clog2(P_GLOBAL_NUM_NEURONS)-1:0]                o_event_addr,
+
+    // 本 core 的性能统计
+    output reg  [31:0]                                            o_skip_count,
+    output reg  [31:0]                                            o_update_count,
+    output reg  [31:0]                                            o_event_count
 );
 
     /*
@@ -60,12 +79,16 @@ module conv_lif_sparse_core #(
     reg [LP_LOCAL_ADDR_WIDTH-1:0] clear_addr_reg;
     reg [LP_LOCAL_ADDR_WIDTH-1:0] addr_pipeline_reg [BRAM_READ_LATENCY-1:0];
     reg valid_pipeline_reg [BRAM_READ_LATENCY-1:0];
+    reg current_valid_pipeline_reg [BRAM_READ_LATENCY-1:0];
     reg pipeline_busy_comb;
 
     wire scan_addr_valid_w;
+    wire scan_addr_valid_raw_w;
     wire [LP_LOCAL_ADDR_WIDTH-1:0] scan_local_addr_w;
     wire [LP_GLOBAL_ADDR_WIDTH-1:0] scan_global_addr_w;
     wire scan_current_valid_w;
+    wire scan_can_issue_w;
+    wire scan_current_accept_w;
     wire scan_need_update_w;
     wire pipeline_busy_w;
     wire [P_CORE_NUM_NEURONS-1:0] active_bitmap_start_w;
@@ -88,6 +111,7 @@ module conv_lif_sparse_core #(
 
     wire [LP_LOCAL_ADDR_WIDTH-1:0] process_local_addr_w;
     wire [LP_GLOBAL_ADDR_WIDTH-1:0] process_global_addr_w;
+    wire process_has_current_w;
     wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] process_input_current_w;
     wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] process_membrane_w;
     wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] process_diff_w;
@@ -105,16 +129,29 @@ module conv_lif_sparse_core #(
     assign o_core_ready = (current_state_reg == S_IDLE);
     assign active_bitmap_start_w = i_current_valid_bitmap | active_state_bitmap_reg;
     assign compactor_start_w = (current_state_reg == S_IDLE) && (next_state_reg == S_PROCESSING);
-    assign compactor_addr_ready_w = (current_state_reg == S_PROCESSING);
-    assign scan_addr_valid_w = (current_state_reg == S_PROCESSING) && compactor_addr_valid_w;
+    /*
+     * current RAM 输入模式下，如果当前地址需要读取电流，
+     * 必须等外部仲裁器允许读请求后才消耗该地址。
+     * 膜电位衰减地址不需要读 current RAM，可以直接进入流水线。
+     */
+    assign scan_addr_valid_raw_w = (current_state_reg == S_PROCESSING) && compactor_addr_valid_w;
+    assign scan_can_issue_w = (!P_USE_CURRENT_RAM_INPUT) ||
+                              (!scan_current_valid_w) ||
+                              i_current_rd_ready;
+    assign compactor_addr_ready_w = (current_state_reg == S_PROCESSING) && scan_can_issue_w;
+    assign scan_addr_valid_w = scan_addr_valid_raw_w && scan_can_issue_w;
     assign scan_local_addr_w = compactor_addr_w;
     assign scan_global_addr_w = P_CORE_START_ADDR + scan_local_addr_w;
     assign scan_current_valid_w = latched_current_valid_bitmap_reg[scan_local_addr_w];
+    assign scan_current_accept_w = scan_addr_valid_w && scan_current_valid_w;
     assign scan_need_update_w = scan_addr_valid_w;
+    assign o_current_rd_en = scan_addr_valid_raw_w && scan_current_valid_w;
+    assign o_current_rd_addr = scan_global_addr_w;
 
     assign pipeline_busy_w = pipeline_busy_comb;
     assign process_local_addr_w = addr_pipeline_reg[BRAM_READ_LATENCY-1];
     assign process_global_addr_w = P_CORE_START_ADDR + process_local_addr_w;
+    assign process_has_current_w = current_valid_pipeline_reg[BRAM_READ_LATENCY-1];
     assign clear_membrane_en_w = (current_state_reg == S_CLEAR);
     assign membrane_ram_write_en_w = clear_membrane_en_w || lif_membrane_write_en_w;
     assign membrane_ram_write_addr_w = clear_membrane_en_w ? clear_addr_reg : process_local_addr_w;
@@ -124,7 +161,10 @@ module conv_lif_sparse_core #(
                                       (current_state_reg == S_FLUSHING)) &&
                                      valid_pipeline_reg[BRAM_READ_LATENCY-1];
     assign lif_membrane_write_data_w = process_spike_w ? LP_V_RESET_FIXED : process_candidate_w;
-    assign process_input_current_w = i_all_currents_I[process_global_addr_w];
+    assign process_input_current_w = P_USE_CURRENT_RAM_INPUT ?
+                                     ((process_has_current_w && i_current_rd_valid) ? i_current_rd_data :
+                                      {P_NEURON_VALUE_TOTAL_BITS{1'b0}}) :
+                                     i_all_currents_I[process_global_addr_w];
     assign process_membrane_w = membrane_ram_read_data_w;
 
     simple_dual_port_ram #(
@@ -246,20 +286,24 @@ module conv_lif_sparse_core #(
             for (pipe_idx = 0; pipe_idx < BRAM_READ_LATENCY; pipe_idx = pipe_idx + 1) begin
                 addr_pipeline_reg[pipe_idx] <= {LP_LOCAL_ADDR_WIDTH{1'b0}};
                 valid_pipeline_reg[pipe_idx] <= 1'b0;
+                current_valid_pipeline_reg[pipe_idx] <= 1'b0;
             end
         end else begin
             if (current_state_reg == S_IDLE && next_state_reg == S_PROCESSING) begin
                 for (pipe_idx = 0; pipe_idx < BRAM_READ_LATENCY; pipe_idx = pipe_idx + 1) begin
                     addr_pipeline_reg[pipe_idx] <= {LP_LOCAL_ADDR_WIDTH{1'b0}};
                     valid_pipeline_reg[pipe_idx] <= 1'b0;
+                    current_valid_pipeline_reg[pipe_idx] <= 1'b0;
                 end
             end else if (current_state_reg == S_PROCESSING || current_state_reg == S_FLUSHING) begin
                 for (pipe_idx = BRAM_READ_LATENCY - 1; pipe_idx > 0; pipe_idx = pipe_idx - 1) begin
                     addr_pipeline_reg[pipe_idx] <= addr_pipeline_reg[pipe_idx-1];
                     valid_pipeline_reg[pipe_idx] <= valid_pipeline_reg[pipe_idx-1];
+                    current_valid_pipeline_reg[pipe_idx] <= current_valid_pipeline_reg[pipe_idx-1];
                 end
 
                 valid_pipeline_reg[0] <= scan_need_update_w;
+                current_valid_pipeline_reg[0] <= scan_current_accept_w;
                 if (scan_need_update_w) begin
                     addr_pipeline_reg[0] <= scan_local_addr_w;
                 end else begin

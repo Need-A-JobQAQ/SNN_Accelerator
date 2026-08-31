@@ -51,6 +51,14 @@ module conv_lif_aer_tb();
     wire [LP_CONV_AER_ADDR_WIDTH-1:0] w_current_ram_rd_addr;
     wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] w_current_ram_rd_data;
     wire w_current_ram_rd_valid                         ;
+    wire w_current_ch0_rd_en                           ;
+    wire [$clog2(P_NUM_INPUT_PIXELS)-1:0] w_current_ch0_rd_addr;
+    wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] w_current_ch0_rd_data;
+    wire w_current_ch0_rd_valid                        ;
+    wire w_current_ch1_rd_en                           ;
+    wire [$clog2(P_NUM_INPUT_PIXELS)-1:0] w_current_ch1_rd_addr;
+    wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] w_current_ch1_rd_data;
+    wire w_current_ch1_rd_valid                        ;
     wire [P_NUM_NEURONS-1:0] w_current_valid_bitmap        ;
     wire w_conv_lif_input_ready                         ;
     wire w_aer_event_ready                              ;
@@ -81,7 +89,7 @@ module conv_lif_aer_tb();
     wire signed [P_NUM_OUTPUT_NEURONS-1:0][P_NEURON_VALUE_TOTAL_BITS-1:0] tb_neuron_currents;
     wire tb_neuron_currents_valid               ;
 
-    assign w_conv_lif_input_ready = (P_USE_SPARSE_CONV_LIF && !P_FORCE_MULTICORE_CONV_LIF) ?
+    assign w_conv_lif_input_ready = (P_USE_SPARSE_CONV_LIF || P_FORCE_MULTICORE_CONV_LIF) ?
                                     w_current_ram_ready : w_all_currents_valid;
 
 
@@ -94,7 +102,7 @@ module conv_lif_aer_tb();
         .P_PADDING                  (P_PADDING)                 ,
         .P_WEIGHT_BIT_WIDTH         (P_WEIGHT_BIT_WIDTH)        ,
         .P_NEURON_VALUE_TOTAL_BITS  (P_NEURON_VALUE_TOTAL_BITS) ,
-        .P_ENABLE_COMPAT_READBACK  (!(P_USE_SPARSE_CONV_LIF && !P_FORCE_MULTICORE_CONV_LIF)),
+        .P_ENABLE_COMPAT_READBACK  (!(P_USE_SPARSE_CONV_LIF || P_FORCE_MULTICORE_CONV_LIF)),
         .P_CONV0_WEIGHTS_PACKED     (P_CONV0_WEIGHTS_PACKED)    ,
         .P_CONV1_WEIGHTS_PACKED     (P_CONV1_WEIGHTS_PACKED)    
     ) conv_layer_inst(
@@ -106,6 +114,14 @@ module conv_lif_aer_tb();
         .i_current_rd_addr         (w_current_ram_rd_addr)      ,
         .o_current_rd_data         (w_current_ram_rd_data)      ,
         .o_current_rd_valid        (w_current_ram_rd_valid)     ,
+        .i_current_ch0_rd_en       (w_current_ch0_rd_en),
+        .i_current_ch0_rd_addr     (w_current_ch0_rd_addr),
+        .o_current_ch0_rd_data     (w_current_ch0_rd_data),
+        .o_current_ch0_rd_valid    (w_current_ch0_rd_valid),
+        .i_current_ch1_rd_en       (w_current_ch1_rd_en),
+        .i_current_ch1_rd_addr     (w_current_ch1_rd_addr),
+        .o_current_ch1_rd_data     (w_current_ch1_rd_data),
+        .o_current_ch1_rd_valid    (w_current_ch1_rd_valid),
         .o_current_ram_ready       (w_current_ram_ready)        ,
         .o_current_valid_bitmap (w_current_valid_bitmap)      ,
 
@@ -161,6 +177,14 @@ module conv_lif_aer_tb();
                 .i_input_spike_vector            (tb_input_spike_vector),
                 .i_current_valid_bitmap         (w_current_valid_bitmap),
                 .i_all_currents_I                (w_all_currents_I),
+                .i_current_ch0_rd_data       (w_current_ch0_rd_data),
+                .i_current_ch0_rd_valid      (w_current_ch0_rd_valid),
+                .i_current_ch1_rd_data       (w_current_ch1_rd_data),
+                .i_current_ch1_rd_valid      (w_current_ch1_rd_valid),
+                .o_current_ch0_rd_en         (w_current_ch0_rd_en),
+                .o_current_ch0_rd_addr       (w_current_ch0_rd_addr),
+                .o_current_ch1_rd_en         (w_current_ch1_rd_en),
+                .o_current_ch1_rd_addr       (w_current_ch1_rd_addr),
                 .o_all_spikes_out                (w_all_spikes_out),
                 .o_all_spikes_valid              (w_all_spikes_valid),
                 .o_event_valid                   (w_conv_lif_event_valid),
@@ -212,6 +236,10 @@ module conv_lif_aer_tb();
             assign w_conv_lif_core_event_count = {P_NUM_CONV_LIF_CORES * 32{1'b0}};
             assign w_conv_lif_core_fifo_count = {P_NUM_CONV_LIF_CORES * P_CORE_FIFO_COUNT_WIDTH{1'b0}};
             assign w_conv_lif_core_fifo_max_count = {P_NUM_CONV_LIF_CORES * P_CORE_FIFO_COUNT_WIDTH{1'b0}};
+            assign w_current_ch0_rd_en = 1'b0;
+            assign w_current_ch0_rd_addr = {($clog2(P_NUM_INPUT_PIXELS)){1'b0}};
+            assign w_current_ch1_rd_en = 1'b0;
+            assign w_current_ch1_rd_addr = {($clog2(P_NUM_INPUT_PIXELS)){1'b0}};
             assign w_conv_lif_core_fifo_overflow = 1'b0;
         end else begin : gen_dense_conv_lif
             conv_lif_layer #(
@@ -223,6 +251,14 @@ module conv_lif_aer_tb();
                 .rst_n                           (tb_rst_n),
                 .i_enable_layer                  (r_enable_layer),
                 .i_all_currents_I                (w_all_currents_I),
+                .i_current_ch0_rd_data       (w_current_ch0_rd_data),
+                .i_current_ch0_rd_valid      (w_current_ch0_rd_valid),
+                .i_current_ch1_rd_data       (w_current_ch1_rd_data),
+                .i_current_ch1_rd_valid      (w_current_ch1_rd_valid),
+                .o_current_ch0_rd_en         (w_current_ch0_rd_en),
+                .o_current_ch0_rd_addr       (w_current_ch0_rd_addr),
+                .o_current_ch1_rd_en         (w_current_ch1_rd_en),
+                .o_current_ch1_rd_addr       (w_current_ch1_rd_addr),
                 .o_all_spikes_out                (w_all_spikes_out),
                 .o_all_spikes_valid              (w_all_spikes_valid),
                 .o_event_valid                   (w_conv_lif_event_valid),
@@ -236,6 +272,10 @@ module conv_lif_aer_tb();
             assign w_conv_lif_core_event_count = {P_NUM_CONV_LIF_CORES * 32{1'b0}};
             assign w_conv_lif_core_fifo_count = {P_NUM_CONV_LIF_CORES * P_CORE_FIFO_COUNT_WIDTH{1'b0}};
             assign w_conv_lif_core_fifo_max_count = {P_NUM_CONV_LIF_CORES * P_CORE_FIFO_COUNT_WIDTH{1'b0}};
+            assign w_current_ch0_rd_en = 1'b0;
+            assign w_current_ch0_rd_addr = {($clog2(P_NUM_INPUT_PIXELS)){1'b0}};
+            assign w_current_ch1_rd_en = 1'b0;
+            assign w_current_ch1_rd_addr = {($clog2(P_NUM_INPUT_PIXELS)){1'b0}};
             assign w_conv_lif_core_fifo_overflow = 1'b0;
             assign w_current_ram_rd_en = 1'b0;
             assign w_current_ram_rd_addr = {LP_CONV_AER_ADDR_WIDTH{1'b0}};
@@ -414,6 +454,7 @@ module conv_lif_aer_tb();
     end
 
 endmodule
+
 
 
 
