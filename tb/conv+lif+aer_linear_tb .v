@@ -36,7 +36,6 @@ module conv_lif_aer_tb();
     localparam P_FORCE_MULTICORE_CONV_LIF = 1           ;// �? TB 默认强制启用�? core 路径
     localparam P_AER_ARB_POLICY = 1                     ;// 0:固定优先�? 1:轮询 2:FIFO负载感知
     localparam P_USE_SPARSE_CONV_LIF = 0                ;// 1:使用单核�?疏跳过卷�? LIF�?0:使用原始卷积 LIF
-    localparam P_USE_STATIC_MASK = 0                    ;// 1:使用静�?? mask AER 全连接；0:使用原始 AER 全连�?
     
     reg tb_clk                     ; 
     reg tb_rst_n                   ;
@@ -314,61 +313,28 @@ module conv_lif_aer_tb();
             end
         end
     end
-
-    /*
-     * AER 全连接层可�?�：
-     * P_USE_STATIC_MASK=0 使用原始 dense AER 全连接；
-     * P_USE_STATIC_MASK=1 使用带静态剪�? mask �? AER 全连接�??
-     */
-    generate
-        if (P_USE_STATIC_MASK) begin : gen_masked_aer_linear
-            masked_aer_linear_layer #(
-                .P_NUM_INPUT_EVENTS         (LP_NUM_CONV_FEATURES),
-                .P_EVENT_ADDR_WIDTH         (LP_CONV_AER_ADDR_WIDTH),
-                .P_WEIGHT_BIT_WIDTH         (P_WEIGHT_BIT_WIDTH),
-                .P_NEURON_VALUE_TOTAL_BITS  (P_NEURON_VALUE_TOTAL_BITS),
-                .P_NEURON_VALUE_FRAC_BITS   (P_NEURON_VALUE_FRAC_BITS),
-                .P_BRAM_DATA_WIDTH          (P_WEIGHT_BRAM_DATA_WIDTH),
-                .P_BRAM_ADDR_WIDTH          ($clog2(P_WEIGHT_BRAM_EFFECTIVE_DEPTH)),
-                .P_BRAM_READ_LATENCY        (2),
-                .P_NUM_OUTPUT_NEURONS       (P_NUM_OUTPUT_NEURONS),
-                .P_MASK_WIDTH               (16)
-            ) u_masked_aer_linear_layer (
-                .clk                    (tb_clk),
-                .rst_n                  (tb_rst_n),
-                .i_start                (r_enable_layer),
-                .i_event_valid          (w_fifo_event_valid),
-                .i_event_addr           (w_fifo_event_addr),
-                .i_event_frame_done     (w_aer_event_frame_done),
-                .o_event_ready          (w_aer_event_ready),
-                .o_all_currents_I       (tb_neuron_currents),
-                .o_all_currents_valid   (tb_neuron_currents_valid)
-            );
-        end else begin : gen_dense_aer_linear
-            aer_linear_layer #(
-                .P_NUM_INPUT_EVENTS         (LP_NUM_CONV_FEATURES),
-                .P_EVENT_ADDR_WIDTH         (LP_CONV_AER_ADDR_WIDTH),
-                .P_WEIGHT_BIT_WIDTH         (P_WEIGHT_BIT_WIDTH),
-                .P_NEURON_VALUE_TOTAL_BITS  (P_NEURON_VALUE_TOTAL_BITS),
-                .P_NEURON_VALUE_FRAC_BITS   (P_NEURON_VALUE_FRAC_BITS),
-                .P_BRAM_DATA_WIDTH          (P_WEIGHT_BRAM_DATA_WIDTH),
-                .P_BRAM_ADDR_WIDTH          ($clog2(P_WEIGHT_BRAM_EFFECTIVE_DEPTH)),
-                .P_BRAM_READ_LATENCY        (2),
-                .P_NUM_OUTPUT_NEURONS       (P_NUM_OUTPUT_NEURONS)
-            ) u_aer_linear_layer (
-                .clk                    (tb_clk),
-                .rst_n                  (tb_rst_n),
-                .i_start                (r_enable_layer),
-                .i_event_valid          (w_fifo_event_valid),
-                .i_event_addr           (w_fifo_event_addr),
-                .i_event_frame_done     (w_aer_event_frame_done),
-                .o_event_ready          (w_aer_event_ready),
-                .o_all_currents_I       (tb_neuron_currents),
-                .o_all_currents_valid   (tb_neuron_currents_valid)
-            );
-        end
-    endgenerate
-
+    // AER 全连接层：接收卷积 LIF 产生的地址事件，累加得到输出层输入电流。
+    aer_linear_layer #(
+        .P_NUM_INPUT_EVENTS         (LP_NUM_CONV_FEATURES),
+        .P_EVENT_ADDR_WIDTH         (LP_CONV_AER_ADDR_WIDTH),
+        .P_WEIGHT_BIT_WIDTH         (P_WEIGHT_BIT_WIDTH),
+        .P_NEURON_VALUE_TOTAL_BITS  (P_NEURON_VALUE_TOTAL_BITS),
+        .P_NEURON_VALUE_FRAC_BITS   (P_NEURON_VALUE_FRAC_BITS),
+        .P_BRAM_DATA_WIDTH          (P_WEIGHT_BRAM_DATA_WIDTH),
+        .P_BRAM_ADDR_WIDTH          ($clog2(P_WEIGHT_BRAM_EFFECTIVE_DEPTH)),
+        .P_BRAM_READ_LATENCY        (2),
+        .P_NUM_OUTPUT_NEURONS       (P_NUM_OUTPUT_NEURONS)
+    ) u_aer_linear_layer (
+        .clk                    (tb_clk),
+        .rst_n                  (tb_rst_n),
+        .i_start                (r_enable_layer),
+        .i_event_valid          (w_fifo_event_valid),
+        .i_event_addr           (w_fifo_event_addr),
+        .i_event_frame_done     (w_aer_event_frame_done),
+        .o_event_ready          (w_aer_event_ready),
+        .o_all_currents_I       (tb_neuron_currents),
+        .o_all_currents_valid   (tb_neuron_currents_valid)
+    );
 
     initial begin
         tb_clk = 1'b0;
@@ -384,11 +350,7 @@ module conv_lif_aer_tb();
         end else begin
             $display("[%0t ns] SIM_INFO: conv_lif mode = DENSE UPDATE.", $time);
         end
-        if (P_USE_STATIC_MASK) begin
-            $display("[%0t ns] SIM_INFO: AER linear mode = STATIC MASK.", $time);
-        end else begin
-            $display("[%0t ns] SIM_INFO: AER linear mode = DENSE.", $time);
-        end
+        $display("[%0t ns] SIM_INFO: AER linear mode = DENSE.", $time);
 
         tb_rst_n = 1'b0;
         tb_calc_start =1'b0;
@@ -454,6 +416,7 @@ module conv_lif_aer_tb();
     end
 
 endmodule
+
 
 
 

@@ -27,9 +27,9 @@ module snn_top_tb;
     localparam P_CONV_OUT_CHANNELS         = 2;
     localparam P_CONV_KERNEL_SIZE          = 3;
     localparam P_CONV_PADDING              = 1;
-    localparam P_USE_MASKED_FC             = 0;
     localparam P_USE_SPARSE_CONV_LIF       = 0;
     localparam P_USE_MULTICORE_CONV_LIF    = 1;
+    localparam P_USE_BLOCK_AER_FC          = 1;
     localparam P_CONV_WEIGHT_PACKED_WIDTH  = P_CONV_KERNEL_SIZE * P_CONV_KERNEL_SIZE * P_WEIGHT_BIT_WIDTH;
     localparam [P_CONV_WEIGHT_PACKED_WIDTH-1:0] P_CONV0_WEIGHTS_PACKED = {16'hFA52,16'h1085,16'hFF5B,
                                                                           16'h0602,16'h0A60,16'hF5AA,
@@ -68,6 +68,27 @@ module snn_top_tb;
     wire                                   tb_perf_valid;
     // wire                                   tb_o_prediction_valid; // 已从 snn_top 模块定义中移除
     // wire                                   tb_o_snn_overall_busy; // 已从 snn_top 模块定义中移除
+    // --- Block-Mask AER 压缩率统计 ---
+    // 按 16/32/64 个地址为一块，统计普通 AER 事件可合并成多少个块事件包。
+    localparam LP_BLOCK16_COUNT = (LP_NUM_CONV_FEATURES + 15) / 16;
+    localparam LP_BLOCK32_COUNT = (LP_NUM_CONV_FEATURES + 31) / 32;
+    localparam LP_BLOCK64_COUNT = (LP_NUM_CONV_FEATURES + 63) / 64;
+    localparam LP_WEIGHT_GROUP4_COUNT = (LP_NUM_CONV_FEATURES + 3) / 4;
+
+    reg [LP_BLOCK16_COUNT-1:0] stat_block16_seen;
+    reg [LP_BLOCK32_COUNT-1:0] stat_block32_seen;
+    reg [LP_BLOCK64_COUNT-1:0] stat_block64_seen;
+    reg [LP_WEIGHT_GROUP4_COUNT-1:0] stat_group4_seen;
+    integer                    stat_aer_events_total;
+    integer                    stat_block16_packets_total;
+    integer                    stat_block32_packets_total;
+    integer                    stat_block64_packets_total;
+    integer                    stat_group4_reads_total;
+    integer                    stat_aer_events_last;
+    integer                    stat_block16_packets_last;
+    integer                    stat_block32_packets_last;
+    integer                    stat_block64_packets_last;
+    integer                    stat_group4_reads_last;
 
 
     // --- DUT (snn_top) 实例化 ---
@@ -91,9 +112,9 @@ module snn_top_tb;
         .P_CONV_PADDING             (P_CONV_PADDING),
         .P_CONV0_WEIGHTS_PACKED     (P_CONV0_WEIGHTS_PACKED),
         .P_CONV1_WEIGHTS_PACKED     (P_CONV1_WEIGHTS_PACKED),
-        .P_USE_MASKED_FC            (P_USE_MASKED_FC),
         .P_USE_SPARSE_CONV_LIF      (P_USE_SPARSE_CONV_LIF),
-        .P_USE_MULTICORE_CONV_LIF   (P_USE_MULTICORE_CONV_LIF)
+        .P_USE_MULTICORE_CONV_LIF   (P_USE_MULTICORE_CONV_LIF),
+        .P_USE_BLOCK_AER_FC         (P_USE_BLOCK_AER_FC)
     ) u_snn_top_inst (
         .clk                          (tb_clk),
         .rst_n                        (tb_rst_n),
@@ -119,12 +140,70 @@ module snn_top_tb;
         tb_clk = 1'b0;
         forever #(CLK_PERIOD/2) tb_clk = ~tb_clk;
     end
+    always @(posedge tb_clk or negedge tb_rst_n) begin
+        if (!tb_rst_n) begin
+            stat_block16_seen <= {LP_BLOCK16_COUNT{1'b0}};
+            stat_block32_seen <= {LP_BLOCK32_COUNT{1'b0}};
+            stat_block64_seen <= {LP_BLOCK64_COUNT{1'b0}};
+            stat_group4_seen <= {LP_WEIGHT_GROUP4_COUNT{1'b0}};
+            stat_aer_events_total <= 0;
+            stat_block16_packets_total <= 0;
+            stat_block32_packets_total <= 0;
+            stat_block64_packets_total <= 0;
+            stat_group4_reads_total <= 0;
+            stat_aer_events_last <= 0;
+            stat_block16_packets_last <= 0;
+            stat_block32_packets_last <= 0;
+            stat_block64_packets_last <= 0;
+            stat_group4_reads_last <= 0;
+        end else begin
+            if (u_snn_top_inst.conv_lif_actual_enable_r) begin
+                stat_block16_seen <= {LP_BLOCK16_COUNT{1'b0}};
+                stat_block32_seen <= {LP_BLOCK32_COUNT{1'b0}};
+                stat_block64_seen <= {LP_BLOCK64_COUNT{1'b0}};
+                stat_group4_seen <= {LP_WEIGHT_GROUP4_COUNT{1'b0}};
+                stat_aer_events_last <= 0;
+                stat_block16_packets_last <= 0;
+                stat_block32_packets_last <= 0;
+                stat_block64_packets_last <= 0;
+                stat_group4_reads_last <= 0;
+            end
+
+            if (u_snn_top_inst.perf_aer_event_accept_w) begin
+                stat_aer_events_total <= stat_aer_events_total + 1;
+                stat_aer_events_last <= stat_aer_events_last + 1;
+
+                if (!stat_block16_seen[u_snn_top_inst.aer_event_addr[10:4]]) begin
+                    stat_block16_seen[u_snn_top_inst.aer_event_addr[10:4]] <= 1'b1;
+                    stat_block16_packets_total <= stat_block16_packets_total + 1;
+                    stat_block16_packets_last <= stat_block16_packets_last + 1;
+                end
+
+                if (!stat_block32_seen[u_snn_top_inst.aer_event_addr[10:5]]) begin
+                    stat_block32_seen[u_snn_top_inst.aer_event_addr[10:5]] <= 1'b1;
+                    stat_block32_packets_total <= stat_block32_packets_total + 1;
+                    stat_block32_packets_last <= stat_block32_packets_last + 1;
+                end
+
+                if (!stat_block64_seen[u_snn_top_inst.aer_event_addr[10:6]]) begin
+                    stat_block64_seen[u_snn_top_inst.aer_event_addr[10:6]] <= 1'b1;
+                    stat_block64_packets_total <= stat_block64_packets_total + 1;
+                    stat_block64_packets_last <= stat_block64_packets_last + 1;
+                end
+                if (!stat_group4_seen[u_snn_top_inst.aer_event_addr[10:2]]) begin
+                    stat_group4_seen[u_snn_top_inst.aer_event_addr[10:2]] <= 1'b1;
+                    stat_group4_reads_total <= stat_group4_reads_total + 1;
+                    stat_group4_reads_last <= stat_group4_reads_last + 1;
+                end
+            end
+        end
+    end
 
     // 激励和检查
     initial begin
         $display("[%0t ns] SIM_INFO: snn_top_tb simulation start", $time);
-        if (P_USE_MASKED_FC) begin
-            $display("[%0t ns] SIM_INFO: AER FC mode = MASKED, fc_mask_0p1 IP must be available.", $time);
+        if (P_USE_BLOCK_AER_FC) begin
+            $display("[%0t ns] SIM_INFO: AER FC mode = BLOCK-MASK.", $time);
         end else begin
             $display("[%0t ns] SIM_INFO: AER FC mode = DENSE.", $time);
         end
@@ -179,7 +258,30 @@ module snn_top_tb;
                  tb_perf_last_conv_lif_update_count,
                  tb_perf_total_conv_lif_skip_count,
                  tb_perf_total_conv_lif_update_count,
-                 tb_perf_valid);
+                 tb_perf_valid);        
+        $display("SIM_INFO: block_mask_aer events_total=%0d, pkt16=%0d, pkt32=%0d, pkt64=%0d",
+                 stat_aer_events_total,
+                 stat_block16_packets_total,
+                 stat_block32_packets_total,
+                 stat_block64_packets_total);
+        if (stat_aer_events_total != 0) begin
+            $display("SIM_INFO: block_mask_aer compression pkt16=%0d%%, pkt32=%0d%%, pkt64=%0d%%",
+                     100 - (stat_block16_packets_total * 100) / stat_aer_events_total,
+                     100 - (stat_block32_packets_total * 100) / stat_aer_events_total,
+                     100 - (stat_block64_packets_total * 100) / stat_aer_events_total);
+        end
+        $display("SIM_INFO: block_mask_aer last_events=%0d, last_pkt16=%0d, last_pkt32=%0d, last_pkt64=%0d",
+                 stat_aer_events_last,
+                 stat_block16_packets_last,
+                 stat_block32_packets_last,
+                 stat_block64_packets_last);
+        $display("SIM_INFO: block_mask_aer weight_group4_reads total=%0d, last=%0d",
+                 stat_group4_reads_total,
+                 stat_group4_reads_last);
+        if (stat_aer_events_total != 0) begin
+            $display("SIM_INFO: block_mask_aer weight_read_reduce group4=%0d%%",
+                     100 - (stat_group4_reads_total * 100) / stat_aer_events_total);
+        end
         
         repeat(10) @(posedge tb_clk);
         $display("[%0t ns] SIM_INFO: snn_top_tb simulation done", $time);
@@ -194,3 +296,9 @@ module snn_top_tb;
     end
 
 endmodule
+
+
+
+
+
+

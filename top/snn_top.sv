@@ -20,9 +20,9 @@ module snn_top #(
         {P_CONV_KERNEL_SIZE * P_CONV_KERNEL_SIZE * P_WEIGHT_BIT_WIDTH{1'b0}},
     parameter [P_CONV_KERNEL_SIZE * P_CONV_KERNEL_SIZE * P_WEIGHT_BIT_WIDTH - 1:0] P_CONV1_WEIGHTS_PACKED =
         {P_CONV_KERNEL_SIZE * P_CONV_KERNEL_SIZE * P_WEIGHT_BIT_WIDTH{1'b0}},
-    parameter P_USE_MASKED_FC = 0,
     parameter P_USE_SPARSE_CONV_LIF = 0,
     parameter P_USE_MULTICORE_CONV_LIF = 0,
+    parameter P_USE_BLOCK_AER_FC = 0,
     parameter P_AER_ARB_POLICY = 1
 ) (
     input wire clk,
@@ -46,6 +46,8 @@ module snn_top #(
 
     localparam LP_NUM_CONV_FEATURES = P_CONV_OUT_CHANNELS * P_NUM_INPUT_PIXELS;
     localparam LP_CONV_AER_ADDR_WIDTH = $clog2(LP_NUM_CONV_FEATURES);
+    localparam LP_BLOCK_AER_SIZE = 32;
+    localparam LP_BLOCK_AER_ID_WIDTH = $clog2((LP_NUM_CONV_FEATURES + LP_BLOCK_AER_SIZE - 1) / LP_BLOCK_AER_SIZE);
     localparam [31:0] LP_NUM_CONV_FEATURES_32 = LP_NUM_CONV_FEATURES;
     localparam LP_CORE_FIFO_COUNT_WIDTH = $clog2(512 + 1);
 
@@ -109,6 +111,24 @@ module snn_top #(
     wire [LP_CONV_AER_ADDR_WIDTH-1:0] aer_event_addr;
     wire aer_event_frame_done;
     wire aer_event_ready;
+    wire dense_aer_event_ready;
+    wire block_packer_event_ready;
+    wire block_packer_block_valid;
+    wire [LP_BLOCK_AER_ID_WIDTH-1:0] block_packer_block_id;
+    wire [LP_BLOCK_AER_SIZE-1:0] block_packer_block_mask;
+    wire block_packer_block_ready;
+    wire block_packer_frame_done;
+    wire block_fifo_valid;
+    wire [LP_BLOCK_AER_ID_WIDTH-1:0] block_fifo_id;
+    wire [LP_BLOCK_AER_SIZE-1:0] block_fifo_mask;
+    wire block_fifo_empty;
+    wire block_fifo_full;
+    wire [$clog2(512 + 1)-1:0] block_fifo_count;
+    wire block_fifo_overflow;
+    wire block_fifo_read_ready;
+    wire block_linear_ready;
+    wire block_linear_frame_done;
+    reg block_frame_done_pending_r;
     wire perf_aer_event_accept_w;
 
     assign conv_lif_input_ready_w = (P_USE_SPARSE_CONV_LIF || P_USE_MULTICORE_CONV_LIF) ?
@@ -443,35 +463,100 @@ module snn_top #(
     end
 
     /*
-     * AER 全连接层可切换版本。
-     * P_USE_MASKED_FC=0 使用原始 dense AER 全连接层；
-     * P_USE_MASKED_FC=1 使用带静态剪枝 mask 的 masked AER 全连接层。
+     * AER 全连接层可选路径。
+     * 普通路径：每个 spike 地址读一次权重；
+     * Block-Mask 路径：先把相邻地址事件打包，再按 group4 粒度减少重复权重读取。
      */
     generate
-        if (P_USE_MASKED_FC) begin : gen_masked_aer_fc
-            masked_aer_linear_layer #(
-                .P_NUM_INPUT_EVENTS         (LP_NUM_CONV_FEATURES),
-                .P_EVENT_ADDR_WIDTH         (LP_CONV_AER_ADDR_WIDTH),
-                .P_WEIGHT_BIT_WIDTH         (P_WEIGHT_BIT_WIDTH),
-                .P_NEURON_VALUE_TOTAL_BITS  (P_NEURON_VALUE_TOTAL_BITS),
-                .P_NEURON_VALUE_FRAC_BITS   (P_NEURON_VALUE_FRAC_BITS),
-                .P_BRAM_DATA_WIDTH          (P_WEIGHT_BRAM_DATA_WIDTH),
-                .P_BRAM_ADDR_WIDTH          ($clog2(P_WEIGHT_BRAM_EFFECTIVE_DEPTH)),
-                .P_BRAM_READ_LATENCY        (2),
-                .P_NUM_OUTPUT_NEURONS       (P_NUM_OUTPUT_NEURONS),
-                .P_MASK_WIDTH               (16)
-            ) u_masked_aer_linear_layer (
+        if (P_USE_BLOCK_AER_FC) begin : gen_block_aer_fc
+            assign aer_event_ready = block_packer_event_ready;
+            assign block_packer_block_ready = !block_fifo_full;
+            assign block_fifo_read_ready = block_linear_ready && !block_linear_frame_done;
+            assign block_linear_frame_done = block_frame_done_pending_r && block_fifo_empty;
+            assign dense_aer_event_ready = 1'b0;
+
+            aer_to_block_mask_packer #(
+                .P_EVENT_ADDR_WIDTH    (LP_CONV_AER_ADDR_WIDTH),
+                .P_BLOCK_SIZE          (LP_BLOCK_AER_SIZE),
+                .P_BLOCK_ID_WIDTH      (LP_BLOCK_AER_ID_WIDTH)
+            ) u_aer_to_block_mask_packer (
                 .clk                    (clk),
                 .rst_n                  (rst_n),
-                .i_start                (conv_lif_actual_enable_r),
+                .i_clear                (conv_lif_actual_enable_r),
                 .i_event_valid          (aer_event_valid),
                 .i_event_addr           (aer_event_addr),
                 .i_event_frame_done     (aer_event_frame_done),
-                .o_event_ready          (aer_event_ready),
-                .o_all_currents_I       (neuron_currents),
-                .o_all_currents_valid   (neuron_currents_valid)
+                .o_event_ready          (block_packer_event_ready),
+                .o_block_valid          (block_packer_block_valid),
+                .o_block_id             (block_packer_block_id),
+                .o_block_mask           (block_packer_block_mask),
+                .i_block_ready          (block_packer_block_ready),
+                .o_block_frame_done     (block_packer_frame_done)
+            );
+
+            block_event_fifo #(
+                .P_BLOCK_ID_WIDTH      (LP_BLOCK_AER_ID_WIDTH),
+                .P_BLOCK_SIZE          (LP_BLOCK_AER_SIZE),
+                .P_FIFO_DEPTH          (512)
+            ) u_block_event_fifo (
+                .clk                    (clk),
+                .rst_n                  (rst_n),
+                .i_clear                (conv_lif_actual_enable_r),
+                .i_block_valid          (block_packer_block_valid),
+                .i_block_id             (block_packer_block_id),
+                .i_block_mask           (block_packer_block_mask),
+                .i_block_ready          (block_fifo_read_ready),
+                .o_block_valid          (block_fifo_valid),
+                .o_block_id             (block_fifo_id),
+                .o_block_mask           (block_fifo_mask),
+                .o_empty                (block_fifo_empty),
+                .o_full                 (block_fifo_full),
+                .o_count                (block_fifo_count),
+                .o_overflow             (block_fifo_overflow)
+            );
+
+            block_aer_linear_layer #(
+                .P_NUM_INPUT_EVENTS        (LP_NUM_CONV_FEATURES),
+                .P_BLOCK_SIZE              (LP_BLOCK_AER_SIZE),
+                .P_BLOCK_ID_WIDTH          (LP_BLOCK_AER_ID_WIDTH),
+                .P_WEIGHT_BIT_WIDTH        (P_WEIGHT_BIT_WIDTH),
+                .P_NEURON_VALUE_TOTAL_BITS (P_NEURON_VALUE_TOTAL_BITS),
+                .P_NEURON_VALUE_FRAC_BITS  (P_NEURON_VALUE_FRAC_BITS),
+                .P_BRAM_DATA_WIDTH         (P_WEIGHT_BRAM_DATA_WIDTH),
+                .P_BRAM_ADDR_WIDTH         ($clog2(P_WEIGHT_BRAM_EFFECTIVE_DEPTH)),
+                .P_BRAM_READ_LATENCY       (2),
+                .P_NUM_OUTPUT_NEURONS      (P_NUM_OUTPUT_NEURONS)
+            ) u_block_aer_linear_layer (
+                .clk                       (clk),
+                .rst_n                     (rst_n),
+                .i_start                   (conv_lif_actual_enable_r),
+                .i_block_valid             (block_fifo_valid),
+                .i_block_id                (block_fifo_id),
+                .i_block_mask              (block_fifo_mask),
+                .i_block_frame_done        (block_linear_frame_done),
+                .o_block_ready             (block_linear_ready),
+                .o_all_currents_I          (neuron_currents),
+                .o_all_currents_valid      (neuron_currents_valid)
             );
         end else begin : gen_dense_aer_fc
+            assign aer_event_ready = dense_aer_event_ready;
+            assign block_packer_event_ready = 1'b0;
+            assign block_packer_block_valid = 1'b0;
+            assign block_packer_block_id = {LP_BLOCK_AER_ID_WIDTH{1'b0}};
+            assign block_packer_block_mask = {LP_BLOCK_AER_SIZE{1'b0}};
+            assign block_packer_block_ready = 1'b0;
+            assign block_packer_frame_done = 1'b0;
+            assign block_fifo_valid = 1'b0;
+            assign block_fifo_id = {LP_BLOCK_AER_ID_WIDTH{1'b0}};
+            assign block_fifo_mask = {LP_BLOCK_AER_SIZE{1'b0}};
+            assign block_fifo_empty = 1'b1;
+            assign block_fifo_full = 1'b0;
+            assign block_fifo_count = {($clog2(512 + 1)){1'b0}};
+            assign block_fifo_overflow = 1'b0;
+            assign block_fifo_read_ready = 1'b0;
+            assign block_linear_ready = 1'b0;
+            assign block_linear_frame_done = 1'b0;
+
             aer_linear_layer #(
                 .P_NUM_INPUT_EVENTS         (LP_NUM_CONV_FEATURES),
                 .P_EVENT_ADDR_WIDTH         (LP_CONV_AER_ADDR_WIDTH),
@@ -489,12 +574,30 @@ module snn_top #(
                 .i_event_valid          (aer_event_valid),
                 .i_event_addr           (aer_event_addr),
                 .i_event_frame_done     (aer_event_frame_done),
-                .o_event_ready          (aer_event_ready),
+                .o_event_ready          (dense_aer_event_ready),
                 .o_all_currents_I       (neuron_currents),
                 .o_all_currents_valid   (neuron_currents_valid)
             );
         end
     endgenerate
+
+    /*
+     * Block-Mask 路径的 frame_done 等待标志。
+     * packer 输出本时间步结束后，等待 block FIFO 排空，再通知 block_aer_linear_layer 收尾。
+     */
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            block_frame_done_pending_r <= 1'b0;
+        end else begin
+            if (conv_lif_actual_enable_r) begin
+                block_frame_done_pending_r <= 1'b0;
+            end else if (block_packer_frame_done) begin
+                block_frame_done_pending_r <= 1'b1;
+            end else if (block_linear_frame_done && block_linear_ready) begin
+                block_frame_done_pending_r <= 1'b0;
+            end
+        end
+    end
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
