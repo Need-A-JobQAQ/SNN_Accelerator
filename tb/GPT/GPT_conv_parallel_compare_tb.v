@@ -32,9 +32,24 @@ module GPT_conv_parallel_compare_tb;
     reg [P_NUM_INPUT_PIXELS-1:0] tb_input_spikes;
 
     wire signed [P_NUM_OUTPUT_FEATURES-1:0][P_NEURON_VALUE_TOTAL_BITS-1:0] ref_currents;
-    wire signed [P_NUM_OUTPUT_FEATURES-1:0][P_NEURON_VALUE_TOTAL_BITS-1:0] parallel_currents;
+    reg signed [P_NUM_OUTPUT_FEATURES-1:0][P_NEURON_VALUE_TOTAL_BITS-1:0] parallel_currents;
     wire ref_valid;
     wire parallel_valid;
+
+    wire parallel_current_ch0_wr_en;
+    wire [($clog2(P_NUM_INPUT_PIXELS))-1:0] parallel_current_ch0_wr_addr;
+    wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] parallel_current_ch0_wr_data;
+    wire parallel_current_ch0_wr_active;
+    wire parallel_current_ch1_wr_en;
+    wire [($clog2(P_NUM_INPUT_PIXELS))-1:0] parallel_current_ch1_wr_addr;
+    wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] parallel_current_ch1_wr_data;
+    wire parallel_current_ch1_wr_active;
+    wire parallel_current_wr_done;
+    wire parallel_current_buffer_ready;
+    reg parallel_current_rd_en;
+    reg [($clog2(P_NUM_OUTPUT_FEATURES))-1:0] parallel_current_rd_addr;
+    wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] parallel_current_rd_data;
+    wire parallel_current_rd_valid;
 
     reg ref_done_seen;
     reg parallel_done_seen;
@@ -79,10 +94,34 @@ module GPT_conv_parallel_compare_tb;
         .rst_n                  (tb_rst_n),
         .i_calc_start           (tb_start),
         .i_input_spike_vector   (tb_input_spikes),
-        .i_current_rd_en            (1'b0),
-        .i_current_rd_addr          ({($clog2(P_NUM_OUTPUT_CHANNELS * P_NUM_INPUT_PIXELS)){1'b0}}),
-        .o_current_rd_data          (),
-        .o_current_rd_valid         (),
+        .o_current_ch0_wr_en    (parallel_current_ch0_wr_en),
+        .o_current_ch0_wr_addr  (parallel_current_ch0_wr_addr),
+        .o_current_ch0_wr_data  (parallel_current_ch0_wr_data),
+        .o_current_ch0_wr_active(parallel_current_ch0_wr_active),
+        .o_current_ch1_wr_en    (parallel_current_ch1_wr_en),
+        .o_current_ch1_wr_addr  (parallel_current_ch1_wr_addr),
+        .o_current_ch1_wr_data  (parallel_current_ch1_wr_data),
+        .o_current_ch1_wr_active(parallel_current_ch1_wr_active),
+        .o_current_wr_done      (parallel_current_wr_done)
+    );
+
+    conv_current_pingpong_buffer #(
+        .P_NUM_INPUT_PIXELS         (P_NUM_INPUT_PIXELS),
+        .P_NUM_OUTPUT_CHANNELS      (P_NUM_OUTPUT_CHANNELS),
+        .P_NEURON_VALUE_TOTAL_BITS  (P_NEURON_VALUE_TOTAL_BITS)
+    ) u_parallel_current_buffer (
+        .clk                        (tb_clk),
+        .rst_n                      (tb_rst_n),
+        .i_clear                    (tb_start),
+        .i_current_ch0_wr_en        (parallel_current_ch0_wr_en),
+        .i_current_ch0_wr_addr      (parallel_current_ch0_wr_addr),
+        .i_current_ch0_wr_data      (parallel_current_ch0_wr_data),
+        .i_current_ch0_wr_active    (parallel_current_ch0_wr_active),
+        .i_current_ch1_wr_en        (parallel_current_ch1_wr_en),
+        .i_current_ch1_wr_addr      (parallel_current_ch1_wr_addr),
+        .i_current_ch1_wr_data      (parallel_current_ch1_wr_data),
+        .i_current_ch1_wr_active    (parallel_current_ch1_wr_active),
+        .i_current_wr_done          (parallel_current_wr_done),
         .i_current_ch0_rd_en        (1'b0),
         .i_current_ch0_rd_addr      ({($clog2(P_NUM_INPUT_PIXELS)){1'b0}}),
         .o_current_ch0_rd_data      (),
@@ -91,11 +130,18 @@ module GPT_conv_parallel_compare_tb;
         .i_current_ch1_rd_addr      ({($clog2(P_NUM_INPUT_PIXELS)){1'b0}}),
         .o_current_ch1_rd_data      (),
         .o_current_ch1_rd_valid     (),
-        .o_current_ram_ready        (),
-        .o_current_valid_bitmap     (),
-        .o_all_currents_I       (parallel_currents),
-        .o_all_currents_valid   (parallel_valid)
+        .i_current_rd_en            (parallel_current_rd_en),
+        .i_current_rd_addr          (parallel_current_rd_addr),
+        .o_current_rd_data          (parallel_current_rd_data),
+        .o_current_rd_valid         (parallel_current_rd_valid),
+        .o_current_buffer_ready     (parallel_current_buffer_ready),
+        .o_write_buffer_sel         (),
+        .o_read_buffer_sel          (),
+        .o_buffer_valid_bits        (),
+        .o_current_valid_bitmap     ()
     );
+
+    assign parallel_valid = parallel_current_buffer_ready;
 
     initial begin
         tb_clk = 1'b0;
@@ -125,6 +171,8 @@ module GPT_conv_parallel_compare_tb;
         tb_rst_n = 1'b0;
         tb_start = 1'b0;
         tb_input_spikes = {P_NUM_INPUT_PIXELS{1'b0}};
+        parallel_current_rd_en = 1'b0;
+        parallel_current_rd_addr = {($clog2(P_NUM_OUTPUT_FEATURES)){1'b0}};
 
         repeat (5) @(posedge tb_clk);
         tb_rst_n = 1'b1;
@@ -145,7 +193,24 @@ module GPT_conv_parallel_compare_tb;
         tb_start = 1'b0;
 
         wait (ref_done_seen && parallel_done_seen);
-        @(posedge tb_clk);
+
+        // 新版并行卷积只输出写流，这里从 current buffer 读回完整结果用于 TB 对照。
+        for (check_idx = 0; check_idx < P_NUM_OUTPUT_FEATURES; check_idx = check_idx + 1) begin
+            @(negedge tb_clk);
+            parallel_current_rd_en = 1'b1;
+            parallel_current_rd_addr = check_idx[($clog2(P_NUM_OUTPUT_FEATURES))-1:0];
+            @(posedge tb_clk);
+            @(negedge tb_clk);
+            if (!parallel_current_rd_valid) begin
+                $display("[%0t ns] SIM_ERROR: current buffer read valid lost at idx=%0d",
+                         $time, check_idx);
+                error_count = error_count + 1;
+            end
+            parallel_currents[check_idx] = parallel_current_rd_data;
+        end
+
+        @(negedge tb_clk);
+        parallel_current_rd_en = 1'b0;
 
         for (check_idx = 0; check_idx < P_NUM_OUTPUT_FEATURES; check_idx = check_idx + 1) begin
             if (ref_currents[check_idx] !== parallel_currents[check_idx]) begin

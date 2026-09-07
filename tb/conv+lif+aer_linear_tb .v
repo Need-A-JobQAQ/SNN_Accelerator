@@ -42,6 +42,15 @@ module conv_lif_aer_tb();
     reg tb_calc_start              ;
     reg [P_NUM_INPUT_PIXELS-1:0] tb_input_spike_vector;
 
+    wire w_current_ch0_wr_en;
+    wire [$clog2(P_NUM_INPUT_PIXELS)-1:0] w_current_ch0_wr_addr;
+    wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] w_current_ch0_wr_data;
+    wire w_current_ch0_wr_active;
+    wire w_current_ch1_wr_en;
+    wire [$clog2(P_NUM_INPUT_PIXELS)-1:0] w_current_ch1_wr_addr;
+    wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] w_current_ch1_wr_data;
+    wire w_current_ch1_wr_active;
+    wire w_current_wr_done;
     wire signed [P_NUM_OUTPUT_CHANNELS * P_NUM_INPUT_PIXELS - 1:0][P_NEURON_VALUE_TOTAL_BITS-1:0] 
           w_all_currents_I         ; //
     wire  w_all_currents_valid     ; //妯�?�潡闂村唴閮ㄤ俊�??
@@ -90,6 +99,8 @@ module conv_lif_aer_tb();
 
     assign w_conv_lif_input_ready = (P_USE_SPARSE_CONV_LIF || P_FORCE_MULTICORE_CONV_LIF) ?
                                     w_current_ram_ready : w_all_currents_valid;
+    assign w_all_currents_I = {P_NUM_NEURONS * P_NEURON_VALUE_TOTAL_BITS{1'b0}};
+    assign w_all_currents_valid = w_current_ram_ready;
 
 
     conv_layer_parallel #(
@@ -101,7 +112,6 @@ module conv_lif_aer_tb();
         .P_PADDING                  (P_PADDING)                 ,
         .P_WEIGHT_BIT_WIDTH         (P_WEIGHT_BIT_WIDTH)        ,
         .P_NEURON_VALUE_TOTAL_BITS  (P_NEURON_VALUE_TOTAL_BITS) ,
-        .P_ENABLE_COMPAT_READBACK  (!(P_USE_SPARSE_CONV_LIF || P_FORCE_MULTICORE_CONV_LIF)),
         .P_CONV0_WEIGHTS_PACKED     (P_CONV0_WEIGHTS_PACKED)    ,
         .P_CONV1_WEIGHTS_PACKED     (P_CONV1_WEIGHTS_PACKED)    
     ) conv_layer_inst(
@@ -109,23 +119,51 @@ module conv_lif_aer_tb();
         .rst_n                       (tb_rst_n)                  ,
         .i_calc_start                (tb_calc_start)             ,
         .i_input_spike_vector        (tb_input_spike_vector)     ,
-        .i_current_rd_en           (w_current_ram_rd_en)        ,
-        .i_current_rd_addr         (w_current_ram_rd_addr)      ,
-        .o_current_rd_data         (w_current_ram_rd_data)      ,
-        .o_current_rd_valid        (w_current_ram_rd_valid)     ,
-        .i_current_ch0_rd_en       (w_current_ch0_rd_en),
-        .i_current_ch0_rd_addr     (w_current_ch0_rd_addr),
-        .o_current_ch0_rd_data     (w_current_ch0_rd_data),
-        .o_current_ch0_rd_valid    (w_current_ch0_rd_valid),
-        .i_current_ch1_rd_en       (w_current_ch1_rd_en),
-        .i_current_ch1_rd_addr     (w_current_ch1_rd_addr),
-        .o_current_ch1_rd_data     (w_current_ch1_rd_data),
-        .o_current_ch1_rd_valid    (w_current_ch1_rd_valid),
-        .o_current_ram_ready       (w_current_ram_ready)        ,
-        .o_current_valid_bitmap (w_current_valid_bitmap)      ,
+        .o_current_ch0_wr_en         (w_current_ch0_wr_en)       ,
+        .o_current_ch0_wr_addr       (w_current_ch0_wr_addr)     ,
+        .o_current_ch0_wr_data       (w_current_ch0_wr_data)     ,
+        .o_current_ch0_wr_active     (w_current_ch0_wr_active)   ,
+        .o_current_ch1_wr_en         (w_current_ch1_wr_en)       ,
+        .o_current_ch1_wr_addr       (w_current_ch1_wr_addr)     ,
+        .o_current_ch1_wr_data       (w_current_ch1_wr_data)     ,
+        .o_current_ch1_wr_active     (w_current_ch1_wr_active)   ,
+        .o_current_wr_done           (w_current_wr_done)
+    );
 
-        .o_all_currents_I            (w_all_currents_I)         ,
-        .o_all_currents_valid        (w_all_currents_valid)
+    conv_current_pingpong_buffer #(
+        .P_NUM_INPUT_PIXELS          (P_NUM_INPUT_PIXELS),
+        .P_NUM_OUTPUT_CHANNELS       (P_NUM_OUTPUT_CHANNELS),
+        .P_NEURON_VALUE_TOTAL_BITS   (P_NEURON_VALUE_TOTAL_BITS)
+    ) current_buffer_inst (
+        .clk                         (tb_clk),
+        .rst_n                       (tb_rst_n),
+        .i_clear                     (tb_calc_start),
+        .i_current_ch0_wr_en         (w_current_ch0_wr_en),
+        .i_current_ch0_wr_addr       (w_current_ch0_wr_addr),
+        .i_current_ch0_wr_data       (w_current_ch0_wr_data),
+        .i_current_ch0_wr_active     (w_current_ch0_wr_active),
+        .i_current_ch1_wr_en         (w_current_ch1_wr_en),
+        .i_current_ch1_wr_addr       (w_current_ch1_wr_addr),
+        .i_current_ch1_wr_data       (w_current_ch1_wr_data),
+        .i_current_ch1_wr_active     (w_current_ch1_wr_active),
+        .i_current_wr_done           (w_current_wr_done),
+        .i_current_ch0_rd_en         (w_current_ch0_rd_en),
+        .i_current_ch0_rd_addr       (w_current_ch0_rd_addr),
+        .o_current_ch0_rd_data       (w_current_ch0_rd_data),
+        .o_current_ch0_rd_valid      (w_current_ch0_rd_valid),
+        .i_current_ch1_rd_en         (w_current_ch1_rd_en),
+        .i_current_ch1_rd_addr       (w_current_ch1_rd_addr),
+        .o_current_ch1_rd_data       (w_current_ch1_rd_data),
+        .o_current_ch1_rd_valid      (w_current_ch1_rd_valid),
+        .i_current_rd_en             (w_current_ram_rd_en),
+        .i_current_rd_addr           (w_current_ram_rd_addr),
+        .o_current_rd_data           (w_current_ram_rd_data),
+        .o_current_rd_valid          (w_current_ram_rd_valid),
+        .o_current_buffer_ready      (w_current_ram_ready),
+        .o_write_buffer_sel          (),
+        .o_read_buffer_sel           (),
+        .o_buffer_valid_bits         (),
+        .o_current_valid_bitmap      (w_current_valid_bitmap)
     );
 
     always @(posedge tb_clk or negedge tb_rst_n) begin

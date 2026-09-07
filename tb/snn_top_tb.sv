@@ -59,6 +59,10 @@ module snn_top_tb;
     wire [31:0]                            tb_perf_total_aer_events;
     wire [31:0]                            tb_perf_last_aer_events;
     wire [31:0]                            tb_perf_last_aer_fc_cycles;
+    wire [31:0]                            tb_perf_last_conv_cycles;
+    wire [31:0]                            tb_perf_total_conv_cycles;
+    wire [31:0]                            tb_perf_last_conv_lif_cycles;
+    wire [31:0]                            tb_perf_total_conv_lif_cycles;
     wire [31:0]                            tb_perf_actual_time_steps;
     wire [31:0]                            tb_perf_last_conv_lif_skip_count;
     wire [31:0]                            tb_perf_last_conv_lif_update_count;
@@ -124,6 +128,10 @@ module snn_top_tb;
         .o_perf_total_aer_events      (tb_perf_total_aer_events),
         .o_perf_last_aer_events       (tb_perf_last_aer_events),
         .o_perf_last_aer_fc_cycles    (tb_perf_last_aer_fc_cycles),
+        .o_perf_last_conv_cycles      (tb_perf_last_conv_cycles),
+        .o_perf_total_conv_cycles     (tb_perf_total_conv_cycles),
+        .o_perf_last_conv_lif_cycles  (tb_perf_last_conv_lif_cycles),
+        .o_perf_total_conv_lif_cycles (tb_perf_total_conv_lif_cycles),
         .o_perf_actual_time_steps     (tb_perf_actual_time_steps),
         .o_perf_last_conv_lif_skip_count   (tb_perf_last_conv_lif_skip_count),
         .o_perf_last_conv_lif_update_count (tb_perf_last_conv_lif_update_count),
@@ -245,6 +253,26 @@ module snn_top_tb;
                      $time);
         end
 
+        if (P_USE_MULTICORE_CONV_LIF) begin
+            if (P_USE_BLOCK_AER_FC) begin
+                $display("SIM_INFO: mode_summary conv_lif=4-core_sparse, aer_fc=block_mask, current_buffer=pingpong");
+            end else begin
+                $display("SIM_INFO: mode_summary conv_lif=4-core_sparse, aer_fc=dense_aer, current_buffer=pingpong");
+            end
+        end else if (P_USE_SPARSE_CONV_LIF) begin
+            if (P_USE_BLOCK_AER_FC) begin
+                $display("SIM_INFO: mode_summary conv_lif=single_sparse, aer_fc=block_mask, current_buffer=pingpong");
+            end else begin
+                $display("SIM_INFO: mode_summary conv_lif=single_sparse, aer_fc=dense_aer, current_buffer=pingpong");
+            end
+        end else begin
+            if (P_USE_BLOCK_AER_FC) begin
+                $display("SIM_INFO: mode_summary conv_lif=dense, aer_fc=block_mask, current_buffer=pingpong");
+            end else begin
+                $display("SIM_INFO: mode_summary conv_lif=dense, aer_fc=dense_aer, current_buffer=pingpong");
+            end
+        end
+
         $display("SIM_INFO: final predicted label is o_predicted_label = %d (十六进制: %h)",
                  tb_o_predicted_label, tb_o_predicted_label);
         $display("SIM_INFO: 性能计数 total_cycles=%0d, actual_time_steps=%0d, early_stop=%b, total_aer_events=%0d, last_aer_events=%0d, last_aer_fc_cycles=%0d, last_conv_lif_skip=%0d, last_conv_lif_update=%0d, total_conv_lif_skip=%0d, total_conv_lif_update=%0d, perf_valid=%b",
@@ -259,6 +287,12 @@ module snn_top_tb;
                  tb_perf_total_conv_lif_skip_count,
                  tb_perf_total_conv_lif_update_count,
                  tb_perf_valid);        
+        $display("SIM_INFO: phase_cycles last_conv=%0d, total_conv=%0d, last_conv_lif=%0d, total_conv_lif=%0d, last_aer_fc=%0d",
+                 tb_perf_last_conv_cycles,
+                 tb_perf_total_conv_cycles,
+                 tb_perf_last_conv_lif_cycles,
+                 tb_perf_total_conv_lif_cycles,
+                 tb_perf_last_aer_fc_cycles);
         $display("SIM_INFO: block_mask_aer events_total=%0d, pkt16=%0d, pkt32=%0d, pkt64=%0d",
                  stat_aer_events_total,
                  stat_block16_packets_total,

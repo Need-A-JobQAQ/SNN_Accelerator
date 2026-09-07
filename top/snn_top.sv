@@ -34,6 +34,10 @@ module snn_top #(
     output reg [31:0] o_perf_total_aer_events,
     output reg [31:0] o_perf_last_aer_events,
     output reg [31:0] o_perf_last_aer_fc_cycles,
+    output reg [31:0] o_perf_last_conv_cycles,
+    output reg [31:0] o_perf_total_conv_cycles,
+    output reg [31:0] o_perf_last_conv_lif_cycles,
+    output reg [31:0] o_perf_total_conv_lif_cycles,
     output reg [31:0] o_perf_actual_time_steps,
     output reg [31:0] o_perf_last_conv_lif_skip_count,
     output reg [31:0] o_perf_last_conv_lif_update_count,
@@ -72,6 +76,15 @@ module snn_top #(
 
     wire signed [LP_NUM_CONV_FEATURES-1:0][P_NEURON_VALUE_TOTAL_BITS-1:0] conv_currents;
     wire conv_currents_valid;
+    wire conv_current_ch0_wr_en;
+    wire [$clog2(P_NUM_INPUT_PIXELS)-1:0] conv_current_ch0_wr_addr;
+    wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] conv_current_ch0_wr_data;
+    wire conv_current_ch0_wr_active;
+    wire conv_current_ch1_wr_en;
+    wire [$clog2(P_NUM_INPUT_PIXELS)-1:0] conv_current_ch1_wr_addr;
+    wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] conv_current_ch1_wr_data;
+    wire conv_current_ch1_wr_active;
+    wire conv_current_wr_done;
     wire conv_current_ram_ready;
     wire conv_current_ram_rd_en;
     wire [LP_CONV_AER_ADDR_WIDTH-1:0] conv_current_ram_rd_addr;
@@ -133,6 +146,13 @@ module snn_top #(
 
     assign conv_lif_input_ready_w = (P_USE_SPARSE_CONV_LIF || P_USE_MULTICORE_CONV_LIF) ?
                                     conv_current_ram_ready : conv_currents_valid;
+    /*
+     * conv_layer_parallel 已精简为写流输出模块，不再维护旧版完整电流数组。
+     * 当前主数据通路使用 conv_current_pingpong_buffer 的 RAM 读口；
+     * 这里保留零值占位，避免旧 dense 路径出现无驱动信号。
+     */
+    assign conv_currents = {LP_NUM_CONV_FEATURES * P_NEURON_VALUE_TOTAL_BITS{1'b0}};
+    assign conv_currents_valid = conv_current_ram_ready;
 
     wire signed [P_NUM_OUTPUT_NEURONS-1:0][P_NEURON_VALUE_TOTAL_BITS-1:0] neuron_currents;
     wire neuron_currents_valid;
@@ -155,8 +175,12 @@ module snn_top #(
     reg conv_lif_event_frame_done_pending_r;
     reg perf_processing_active_r;
     reg perf_aer_fc_active_r;
+    reg perf_conv_active_r;
+    reg perf_conv_lif_active_r;
     reg [31:0] perf_current_aer_events_r;
     reg [31:0] perf_current_aer_fc_cycles_r;
+    reg [31:0] perf_current_conv_cycles_r;
+    reg [31:0] perf_current_conv_lif_cycles_r;
 
     photo_input u_image_bram (
         .clka   (clk),
@@ -242,7 +266,6 @@ module snn_top #(
         .P_PADDING                  (P_CONV_PADDING),
         .P_WEIGHT_BIT_WIDTH         (P_WEIGHT_BIT_WIDTH),
         .P_NEURON_VALUE_TOTAL_BITS  (P_NEURON_VALUE_TOTAL_BITS),
-        .P_ENABLE_COMPAT_READBACK  (!(P_USE_SPARSE_CONV_LIF || P_USE_MULTICORE_CONV_LIF)),
         .P_CONV0_WEIGHTS_PACKED     (P_CONV0_WEIGHTS_PACKED),
         .P_CONV1_WEIGHTS_PACKED     (P_CONV1_WEIGHTS_PACKED)
     ) u_conv_layer_parallel (
@@ -250,22 +273,51 @@ module snn_top #(
         .rst_n                  (rst_n),
         .i_calc_start           (conv_layer_actual_start_r),
         .i_input_spike_vector   (encoded_spikes),
-        .i_current_rd_en       (conv_current_ram_rd_en),
-        .i_current_rd_addr     (conv_current_ram_rd_addr),
-        .o_current_rd_data     (conv_current_ram_rd_data),
-        .o_current_rd_valid    (conv_current_ram_rd_valid),
-        .i_current_ch0_rd_en   (conv_current_ch0_rd_en),
-        .i_current_ch0_rd_addr (conv_current_ch0_rd_addr),
-        .o_current_ch0_rd_data (conv_current_ch0_rd_data),
-        .o_current_ch0_rd_valid(conv_current_ch0_rd_valid),
-        .i_current_ch1_rd_en   (conv_current_ch1_rd_en),
-        .i_current_ch1_rd_addr (conv_current_ch1_rd_addr),
-        .o_current_ch1_rd_data (conv_current_ch1_rd_data),
-        .o_current_ch1_rd_valid(conv_current_ch1_rd_valid),
-        .o_current_ram_ready   (conv_current_ram_ready),
-        .o_current_valid_bitmap(conv_current_valid_bitmap),
-        .o_all_currents_I       (conv_currents),
-        .o_all_currents_valid   (conv_currents_valid)
+        .o_current_ch0_wr_en    (conv_current_ch0_wr_en),
+        .o_current_ch0_wr_addr  (conv_current_ch0_wr_addr),
+        .o_current_ch0_wr_data  (conv_current_ch0_wr_data),
+        .o_current_ch0_wr_active(conv_current_ch0_wr_active),
+        .o_current_ch1_wr_en    (conv_current_ch1_wr_en),
+        .o_current_ch1_wr_addr  (conv_current_ch1_wr_addr),
+        .o_current_ch1_wr_data  (conv_current_ch1_wr_data),
+        .o_current_ch1_wr_active(conv_current_ch1_wr_active),
+        .o_current_wr_done      (conv_current_wr_done)
+    );
+
+    conv_current_pingpong_buffer #(
+        .P_NUM_INPUT_PIXELS         (P_NUM_INPUT_PIXELS),
+        .P_NUM_OUTPUT_CHANNELS      (P_CONV_OUT_CHANNELS),
+        .P_NEURON_VALUE_TOTAL_BITS  (P_NEURON_VALUE_TOTAL_BITS)
+    ) u_conv_current_pingpong_buffer (
+        .clk                    (clk),
+        .rst_n                  (rst_n),
+        .i_clear                (conv_layer_actual_start_r),
+        .i_current_ch0_wr_en    (conv_current_ch0_wr_en),
+        .i_current_ch0_wr_addr  (conv_current_ch0_wr_addr),
+        .i_current_ch0_wr_data  (conv_current_ch0_wr_data),
+        .i_current_ch0_wr_active(conv_current_ch0_wr_active),
+        .i_current_ch1_wr_en    (conv_current_ch1_wr_en),
+        .i_current_ch1_wr_addr  (conv_current_ch1_wr_addr),
+        .i_current_ch1_wr_data  (conv_current_ch1_wr_data),
+        .i_current_ch1_wr_active(conv_current_ch1_wr_active),
+        .i_current_wr_done      (conv_current_wr_done),
+        .i_current_ch0_rd_en    (conv_current_ch0_rd_en),
+        .i_current_ch0_rd_addr  (conv_current_ch0_rd_addr),
+        .o_current_ch0_rd_data  (conv_current_ch0_rd_data),
+        .o_current_ch0_rd_valid (conv_current_ch0_rd_valid),
+        .i_current_ch1_rd_en    (conv_current_ch1_rd_en),
+        .i_current_ch1_rd_addr  (conv_current_ch1_rd_addr),
+        .o_current_ch1_rd_data  (conv_current_ch1_rd_data),
+        .o_current_ch1_rd_valid (conv_current_ch1_rd_valid),
+        .i_current_rd_en        (conv_current_ram_rd_en),
+        .i_current_rd_addr      (conv_current_ram_rd_addr),
+        .o_current_rd_data      (conv_current_ram_rd_data),
+        .o_current_rd_valid     (conv_current_ram_rd_valid),
+        .o_current_buffer_ready (conv_current_ram_ready),
+        .o_write_buffer_sel     (),
+        .o_read_buffer_sel      (),
+        .o_buffer_valid_bits    (),
+        .o_current_valid_bitmap (conv_current_valid_bitmap)
     );
 
     always @(posedge clk or negedge rst_n) begin
@@ -663,6 +715,76 @@ module snn_top #(
 
     assign o_perf_valid = cu_global_processing_done;
     assign perf_aer_event_accept_w = aer_event_valid && aer_event_ready;
+
+    /*
+     * 卷积阶段周期统计。
+     * 用于评估未来双缓存跨时间步流水时，conv(t+1) 理论上能隐藏多少周期。
+     */
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            perf_conv_active_r <= 1'b0;
+            perf_current_conv_cycles_r <= 32'd0;
+            o_perf_last_conv_cycles <= 32'd0;
+            o_perf_total_conv_cycles <= 32'd0;
+        end else begin
+            if (i_start_new_image_processing) begin
+                perf_conv_active_r <= 1'b0;
+                perf_current_conv_cycles_r <= 32'd0;
+                o_perf_last_conv_cycles <= 32'd0;
+                o_perf_total_conv_cycles <= 32'd0;
+            end else if (conv_layer_actual_start_r && conv_current_ram_ready) begin
+                perf_conv_active_r <= 1'b0;
+                perf_current_conv_cycles_r <= 32'd0;
+                o_perf_last_conv_cycles <= 32'd1;
+                o_perf_total_conv_cycles <= o_perf_total_conv_cycles + 32'd1;
+            end else if (conv_layer_actual_start_r) begin
+                perf_conv_active_r <= 1'b1;
+                perf_current_conv_cycles_r <= 32'd1;
+            end else if (perf_conv_active_r && conv_current_ram_ready) begin
+                perf_conv_active_r <= 1'b0;
+                perf_current_conv_cycles_r <= 32'd0;
+                o_perf_last_conv_cycles <= perf_current_conv_cycles_r;
+                o_perf_total_conv_cycles <= o_perf_total_conv_cycles + perf_current_conv_cycles_r;
+            end else if (perf_conv_active_r) begin
+                perf_current_conv_cycles_r <= perf_current_conv_cycles_r + 32'd1;
+            end
+        end
+    end
+
+    /*
+     * 卷积后 LIF 阶段周期统计。
+     * 起点是后级真正拿到卷积缓存启动脉冲，终点是本时间步脉冲事件帧产生完成。
+     */
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            perf_conv_lif_active_r <= 1'b0;
+            perf_current_conv_lif_cycles_r <= 32'd0;
+            o_perf_last_conv_lif_cycles <= 32'd0;
+            o_perf_total_conv_lif_cycles <= 32'd0;
+        end else begin
+            if (i_start_new_image_processing) begin
+                perf_conv_lif_active_r <= 1'b0;
+                perf_current_conv_lif_cycles_r <= 32'd0;
+                o_perf_last_conv_lif_cycles <= 32'd0;
+                o_perf_total_conv_lif_cycles <= 32'd0;
+            end else if (conv_lif_actual_enable_r && conv_lif_spikes_valid) begin
+                perf_conv_lif_active_r <= 1'b0;
+                perf_current_conv_lif_cycles_r <= 32'd0;
+                o_perf_last_conv_lif_cycles <= 32'd1;
+                o_perf_total_conv_lif_cycles <= o_perf_total_conv_lif_cycles + 32'd1;
+            end else if (conv_lif_actual_enable_r) begin
+                perf_conv_lif_active_r <= 1'b1;
+                perf_current_conv_lif_cycles_r <= 32'd1;
+            end else if (perf_conv_lif_active_r && conv_lif_spikes_valid) begin
+                perf_conv_lif_active_r <= 1'b0;
+                perf_current_conv_lif_cycles_r <= 32'd0;
+                o_perf_last_conv_lif_cycles <= perf_current_conv_lif_cycles_r;
+                o_perf_total_conv_lif_cycles <= o_perf_total_conv_lif_cycles + perf_current_conv_lif_cycles_r;
+            end else if (perf_conv_lif_active_r) begin
+                perf_current_conv_lif_cycles_r <= perf_current_conv_lif_cycles_r + 32'd1;
+            end
+        end
+    end
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
