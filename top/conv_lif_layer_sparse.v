@@ -1,33 +1,48 @@
 module conv_lif_layer_sparse #(
-    parameter P_NUM_NEURONS = 1568,
-    parameter P_NUM_INPUT_PIXELS = 784,
-    parameter P_INPUT_HEIGHT = 28,
-    parameter P_INPUT_WIDTH = 28,
-    parameter P_KERNEL_SIZE = 3,
-    parameter P_PADDING = 1,
-    parameter P_NEURON_VALUE_TOTAL_BITS = 26,
-    parameter P_NEURON_VALUE_FRAC_BITS = 12,
-    parameter P_SKIP_THRESHOLD_SHIFT = 5
+    parameter P_NUM_NEURONS                 = 1568,
+    parameter P_NUM_INPUT_PIXELS            = 784,
+    parameter P_INPUT_HEIGHT                = 28,
+    parameter P_INPUT_WIDTH                 = 28,
+    parameter P_KERNEL_SIZE                 = 3,
+    parameter P_PADDING                     = 1,
+    parameter P_NEURON_VALUE_TOTAL_BITS     = 26,
+    parameter P_NEURON_VALUE_FRAC_BITS      = 12,
+    parameter P_SKIP_THRESHOLD_SHIFT        = 5
 ) (
-    input wire clk,
-    input wire rst_n,
-    input wire i_enable_layer,
-    input wire [P_NUM_INPUT_PIXELS-1:0] i_input_spike_vector,
-    input wire [P_NUM_NEURONS-1:0] i_current_valid_bitmap,
-    input wire signed [P_NUM_NEURONS-1:0][P_NEURON_VALUE_TOTAL_BITS-1:0] i_all_currents_I,
-    input wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] i_current_ram_rd_data,
-    input wire i_current_ram_rd_valid,
+    // 基础控制信号
+    input  wire                                                        clk,
+    input  wire                                                        rst_n,
+    input  wire                                                        i_enable_layer,
 
-    output wire o_current_ram_rd_en,
-    output wire [$clog2(P_NUM_NEURONS)-1:0] o_current_ram_rd_addr,
-    output reg [P_NUM_NEURONS-1:0] o_all_spikes_out,
-    output reg o_all_spikes_valid,
-    output reg o_event_valid,
-    output reg [$clog2(P_NUM_NEURONS)-1:0] o_event_addr,
-    output reg o_event_frame_done,
-    output wire o_layer_ready,
-    output reg [31:0] o_skip_count,
-    output reg [31:0] o_update_count
+    // 本时间步输入信息
+    input  wire [P_NUM_INPUT_PIXELS-1:0]                               i_input_spike_vector,
+    input  wire [P_NUM_NEURONS-1:0]                                    i_current_valid_bitmap,
+
+    // 旧版完整电流数组接口，仅用于兼容未更新路径；当前稀疏路径主要使用 current RAM 读口
+    input  wire signed [P_NUM_NEURONS-1:0][P_NEURON_VALUE_TOTAL_BITS-1:0]
+                                                                        i_all_currents_I,
+
+    // 卷积电流 RAM 读数据输入
+    input  wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0]                 i_current_ram_rd_data,
+    input  wire                                                        i_current_ram_rd_valid,
+
+    // 卷积电流 RAM 读请求输出
+    output wire                                                        o_current_ram_rd_en,
+    output wire [$clog2(P_NUM_NEURONS)-1:0]                            o_current_ram_rd_addr,
+
+    // 完整脉冲向量输出，保留给旧版向量接口或调试观察
+    output reg  [P_NUM_NEURONS-1:0]                                    o_all_spikes_out,
+    output reg                                                         o_all_spikes_valid,
+
+    // AER 事件流输出
+    output reg                                                         o_event_valid,
+    output reg  [$clog2(P_NUM_NEURONS)-1:0]                            o_event_addr,
+    output reg                                                         o_event_frame_done,
+
+    // 层级状态与性能统计
+    output wire                                                        o_layer_ready,
+    output reg  [31:0]                                                 o_skip_count,
+    output reg  [31:0]                                                 o_update_count
 );
 
     /*

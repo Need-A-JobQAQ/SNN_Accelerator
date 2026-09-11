@@ -1,61 +1,63 @@
 module conv_lif_sparse_multicore #(
-    parameter P_NUM_NEURONS             = 1568,
-    parameter P_NUM_CORES               = 4,
-    parameter P_CORE_NUM_NEURONS        = P_NUM_NEURONS / P_NUM_CORES,
-    parameter P_NUM_INPUT_PIXELS        = 784,
-    parameter P_INPUT_HEIGHT            = 28,
-    parameter P_INPUT_WIDTH             = 28,
-    parameter P_KERNEL_SIZE             = 3,
-    parameter P_PADDING                 = 1,
-    parameter P_NEURON_VALUE_TOTAL_BITS = 26,
-    parameter P_NEURON_VALUE_FRAC_BITS  = 12,
-    parameter P_SKIP_THRESHOLD_SHIFT    = 5,
-    parameter P_CORE_EVENT_FIFO_DEPTH   = 512,
-    parameter P_CORE_FIFO_COUNT_WIDTH   = $clog2(P_CORE_EVENT_FIFO_DEPTH + 1),
-    parameter P_ARB_POLICY              = 1
+    parameter P_NUM_NEURONS                 = 1568,
+    parameter P_NUM_CORES                   = 4,
+    parameter P_CORE_NUM_NEURONS            = P_NUM_NEURONS / P_NUM_CORES,
+    parameter P_NUM_INPUT_PIXELS            = 784,
+    parameter P_INPUT_HEIGHT                = 28,
+    parameter P_INPUT_WIDTH                 = 28,
+    parameter P_KERNEL_SIZE                 = 3,
+    parameter P_PADDING                     = 1,
+    parameter P_NEURON_VALUE_TOTAL_BITS     = 26,
+    parameter P_NEURON_VALUE_FRAC_BITS      = 12,
+    parameter P_SKIP_THRESHOLD_SHIFT        = 5,
+    parameter P_CORE_EVENT_FIFO_DEPTH       = 512,
+    parameter P_CORE_FIFO_COUNT_WIDTH       = $clog2(P_CORE_EVENT_FIFO_DEPTH + 1),
+    parameter P_ARB_POLICY                  = 1
 ) (
-    // 时钟、复位和层启动控制
-    input  wire                                                   clk,
-    input  wire                                                   rst_n,
-    input  wire                                                   i_enable_layer,
+    // 基础控制信号
+    input  wire                                                       clk,
+    input  wire                                                       rst_n,
+    input  wire                                                       i_enable_layer,
 
-    // 上游卷积层提供的稀疏调度信息
-    input  wire [P_NUM_INPUT_PIXELS-1:0]                          i_input_spike_vector,
-    input  wire [P_NUM_NEURONS-1:0]                               i_current_valid_bitmap,
+    // 本时间步输入与稀疏调度信息
+    input  wire [P_NUM_INPUT_PIXELS-1:0]                              i_input_spike_vector,
+    input  wire [P_NUM_NEURONS-1:0]                                   i_current_valid_bitmap,
 
-    // 兼容旧版本的完整电流数组输入；当前 bank 读口方案下不再作为主要数据路径
+    // 旧版完整电流数组接口，仅用于兼容未更新路径；当前多核路径主要使用 current bank 读口
     input  wire signed [P_NUM_NEURONS-1:0][P_NEURON_VALUE_TOTAL_BITS-1:0]
-                                                                  i_all_currents_I,
+                                                                      i_all_currents_I,
 
-    // current RAM 通道0读口：供 core0/core1 仲裁访问
-    input  wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0]            i_current_ch0_rd_data,
-    input  wire                                                   i_current_ch0_rd_valid,
-    output wire                                                   o_current_ch0_rd_en,
-    output wire [$clog2(P_NUM_INPUT_PIXELS)-1:0]                  o_current_ch0_rd_addr,
+    // current bank0 读口：供 core0/core1 通过仲裁器访问
+    input  wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0]                i_current_ch0_rd_data,
+    input  wire                                                       i_current_ch0_rd_valid,
+    output wire                                                       o_current_ch0_rd_en,
+    output wire [$clog2(P_NUM_INPUT_PIXELS)-1:0]                      o_current_ch0_rd_addr,
 
-    // current RAM 通道1读口：供 core2/core3 仲裁访问
-    input  wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0]            i_current_ch1_rd_data,
-    input  wire                                                   i_current_ch1_rd_valid,
-    output wire                                                   o_current_ch1_rd_en,
-    output wire [$clog2(P_NUM_INPUT_PIXELS)-1:0]                  o_current_ch1_rd_addr,
+    // current bank1 读口：供 core2/core3 通过仲裁器访问
+    input  wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0]                i_current_ch1_rd_data,
+    input  wire                                                       i_current_ch1_rd_valid,
+    output wire                                                       o_current_ch1_rd_en,
+    output wire [$clog2(P_NUM_INPUT_PIXELS)-1:0]                      o_current_ch1_rd_addr,
 
     // 卷积后 LIF 层输出的完整脉冲向量
-    output wire [P_NUM_NEURONS-1:0]                               o_all_spikes_out,
-    output reg                                                    o_all_spikes_valid,
-    output wire                                                   o_layer_ready,
+    output wire [P_NUM_NEURONS-1:0]                                   o_all_spikes_out,
+    output reg                                                        o_all_spikes_valid,
+    output wire                                                       o_layer_ready,
 
-    // 汇聚后的 AER 事件流
-    output wire                                                   o_event_valid,
-    output wire [$clog2(P_NUM_NEURONS)-1:0]                       o_event_addr,
-    output reg                                                    o_event_frame_done,
+    // 多 core 汇聚后的 AER 事件流
+    output wire                                                       o_event_valid,
+    output wire [$clog2(P_NUM_NEURONS)-1:0]                           o_event_addr,
+    output reg                                                        o_event_frame_done,
 
-    // 层级和 core 级性能统计
-    output wire [31:0]                                            o_skip_count,
-    output wire [31:0]                                            o_update_count,
-    output wire [P_NUM_CORES-1:0][31:0]                           o_core_event_count,
-    output wire [P_NUM_CORES-1:0][P_CORE_FIFO_COUNT_WIDTH-1:0]    o_core_fifo_count,
-    output wire [P_NUM_CORES-1:0][P_CORE_FIFO_COUNT_WIDTH-1:0]    o_core_fifo_max_count,
-    output wire                                                   o_core_fifo_overflow
+    // 层级性能统计
+    output wire [31:0]                                                o_skip_count,
+    output wire [31:0]                                                o_update_count,
+
+    // core/FIFO 级调试与负载观察信息
+    output wire [P_NUM_CORES-1:0][31:0]                               o_core_event_count,
+    output wire [P_NUM_CORES-1:0][P_CORE_FIFO_COUNT_WIDTH-1:0]        o_core_fifo_count,
+    output wire [P_NUM_CORES-1:0][P_CORE_FIFO_COUNT_WIDTH-1:0]        o_core_fifo_max_count,
+    output wire                                                       o_core_fifo_overflow
 );
 
     /*

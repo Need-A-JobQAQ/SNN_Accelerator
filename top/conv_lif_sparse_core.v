@@ -1,50 +1,52 @@
 module conv_lif_sparse_core #(
-    parameter P_GLOBAL_NUM_NEURONS      = 1568,
-    parameter P_CORE_START_ADDR         = 0,
-    parameter P_CORE_NUM_NEURONS        = 392,
-    parameter P_NUM_INPUT_PIXELS        = 784,
-    parameter P_INPUT_HEIGHT            = 28,
-    parameter P_INPUT_WIDTH             = 28,
-    parameter P_KERNEL_SIZE             = 3,
-    parameter P_PADDING                 = 1,
-    parameter P_NEURON_VALUE_TOTAL_BITS = 26,
-    parameter P_NEURON_VALUE_FRAC_BITS  = 12,
-    parameter P_SKIP_THRESHOLD_SHIFT    = 5,
-    parameter P_USE_CURRENT_RAM_INPUT   = 0
+    parameter P_GLOBAL_NUM_NEURONS          = 1568,
+    parameter P_CORE_START_ADDR             = 0,
+    parameter P_CORE_NUM_NEURONS            = 392,
+    parameter P_NUM_INPUT_PIXELS            = 784,
+    parameter P_INPUT_HEIGHT                = 28,
+    parameter P_INPUT_WIDTH                 = 28,
+    parameter P_KERNEL_SIZE                 = 3,
+    parameter P_PADDING                     = 1,
+    parameter P_NEURON_VALUE_TOTAL_BITS     = 26,
+    parameter P_NEURON_VALUE_FRAC_BITS      = 12,
+    parameter P_SKIP_THRESHOLD_SHIFT        = 5,
+    parameter P_USE_CURRENT_RAM_INPUT       = 0
 ) (
-    // 时钟、复位和启动控制
-    input  wire                                                   clk,
-    input  wire                                                   rst_n,
-    input  wire                                                   i_enable_core,
+    // 基础控制信号
+    input  wire                                                       clk,
+    input  wire                                                       rst_n,
+    input  wire                                                       i_enable_core,
 
-    // 本 core 的稀疏调度输入
-    input  wire [P_NUM_INPUT_PIXELS-1:0]                          i_input_spike_vector,
-    input  wire [P_CORE_NUM_NEURONS-1:0]                          i_current_valid_bitmap,
+    // 本 core 的时间步输入与稀疏调度信息
+    input  wire [P_NUM_INPUT_PIXELS-1:0]                              i_input_spike_vector,
+    input  wire [P_CORE_NUM_NEURONS-1:0]                              i_current_valid_bitmap,
 
-    // 兼容旧版本的完整电流数组输入；P_USE_CURRENT_RAM_INPUT=0 时使用
+    // 旧版完整电流数组接口；P_USE_CURRENT_RAM_INPUT=0 时用于兼容旧路径
     input  wire signed [P_GLOBAL_NUM_NEURONS-1:0][P_NEURON_VALUE_TOTAL_BITS-1:0]
-                                                                  i_all_currents_I,
+                                                                      i_all_currents_I,
 
-    // 外部 current RAM 读通道；P_USE_CURRENT_RAM_INPUT=1 时使用
-    input  wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0]            i_current_rd_data,
-    input  wire                                                   i_current_rd_valid,
-    input  wire                                                   i_current_rd_ready,
-    output wire                                                   o_current_rd_en,
-    output wire [$clog2(P_GLOBAL_NUM_NEURONS)-1:0]                o_current_rd_addr,
+    // 外部 current RAM 读数据与仲裁握手；P_USE_CURRENT_RAM_INPUT=1 时使用
+    input  wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0]                i_current_rd_data,
+    input  wire                                                       i_current_rd_valid,
+    input  wire                                                       i_current_rd_ready,
 
-    // 本 core 输出的脉冲结果和运行状态
-    output reg  [P_CORE_NUM_NEURONS-1:0]                          o_core_spikes_out,
-    output reg                                                    o_core_done,
-    output wire                                                   o_core_ready,
+    // 外部 current RAM 读请求
+    output wire                                                       o_current_rd_en,
+    output wire [$clog2(P_GLOBAL_NUM_NEURONS)-1:0]                    o_current_rd_addr,
 
-    // 本 core 产生的 AER 事件
-    output reg                                                    o_event_valid,
-    output reg  [$clog2(P_GLOBAL_NUM_NEURONS)-1:0]                o_event_addr,
+    // 本 core 的脉冲向量输出与运行状态
+    output reg  [P_CORE_NUM_NEURONS-1:0]                              o_core_spikes_out,
+    output reg                                                        o_core_done,
+    output wire                                                       o_core_ready,
+
+    // 本 core 产生的 AER 事件流
+    output reg                                                        o_event_valid,
+    output reg  [$clog2(P_GLOBAL_NUM_NEURONS)-1:0]                    o_event_addr,
 
     // 本 core 的性能统计
-    output reg  [31:0]                                            o_skip_count,
-    output reg  [31:0]                                            o_update_count,
-    output reg  [31:0]                                            o_event_count
+    output reg  [31:0]                                                o_skip_count,
+    output reg  [31:0]                                                o_update_count,
+    output reg  [31:0]                                                o_event_count
 );
 
     /*
