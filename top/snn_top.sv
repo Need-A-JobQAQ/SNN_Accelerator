@@ -99,6 +99,9 @@ module snn_top #(
     wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] conv_current_ch1_rd_data;
     wire conv_current_ch1_rd_valid;
     wire [LP_NUM_CONV_FEATURES-1:0] conv_current_valid_bitmap;
+    wire [P_NUM_INPUT_PIXELS-1:0] conv_current_read_spikes;
+    wire conv_current_write_ready;
+    wire conv_current_read_valid;
     wire conv_lif_input_ready_w;
     wire [LP_NUM_CONV_FEATURES-1:0] conv_lif_output_spikes;
     wire conv_lif_spikes_valid;
@@ -166,6 +169,12 @@ module snn_top #(
 
     reg conv_layer_start_pending_r;
     reg conv_layer_actual_start_r;
+    reg conv_layer_busy_r;
+    reg frontend_active_r;
+    reg frontend_poisson_en_r;
+    reg [$clog2(P_T_MAX+1)-1:0] frontend_next_time_step_r;
+    reg [$clog2(P_T_MAX)-1:0] frontend_time_step_r;
+    reg conv_lif_control_pending_r;
     reg conv_lif_enable_pending_r;
     reg conv_lif_actual_enable_r;
     reg lif_layer_enable_pending_r;
@@ -232,12 +241,49 @@ module snn_top #(
     ) u_poisson_encoder (
         .clk                    (clk),
         .rst_n                  (rst_n),
-        .i_enable_enc           (cu_poisson_encoder_en),
-        .i_time_step_t          (cu_current_time_step_t),
+        .i_enable_enc           (frontend_poisson_en_r),
+        .i_time_step_t          (frontend_time_step_r),
         .i_image_pixel_data     (loaded_image_buffer),
         .o_spike_vector_reg     (encoded_spikes),
         .o_spikes_valid_reg     (encoded_spikes_valid)
     );
+
+    /*
+     * 前端时间步发射器。
+     * 后级仍由 control_unit 按 lif_spikes_valid 严格推进；
+     * 这里仅在双缓存允许时提前发射下一时间步的 Poisson 编码和卷积。
+     */
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            frontend_active_r <= 1'b0;
+            frontend_poisson_en_r <= 1'b0;
+            frontend_next_time_step_r <= {$clog2(P_T_MAX+1){1'b0}};
+            frontend_time_step_r <= {$clog2(P_T_MAX){1'b0}};
+        end else begin
+            frontend_poisson_en_r <= 1'b0;
+
+            if (i_start_new_image_processing) begin
+                frontend_active_r <= 1'b0;
+                frontend_next_time_step_r <= {$clog2(P_T_MAX+1){1'b0}};
+                frontend_time_step_r <= {$clog2(P_T_MAX){1'b0}};
+            end else if (cu_global_processing_done) begin
+                frontend_active_r <= 1'b0;
+                frontend_next_time_step_r <= {$clog2(P_T_MAX+1){1'b0}};
+            end else if (img_loader_load_done) begin
+                frontend_active_r <= 1'b1;
+                frontend_next_time_step_r <= {$clog2(P_T_MAX+1){1'b0}};
+            end else if (frontend_active_r &&
+                         ((frontend_next_time_step_r == {$clog2(P_T_MAX+1){1'b0}}) || conv_lif_actual_enable_r) &&
+                         (frontend_next_time_step_r < P_T_MAX) &&
+                         conv_current_write_ready &&
+                         !conv_layer_busy_r &&
+                         !conv_layer_start_pending_r) begin
+                frontend_poisson_en_r <= 1'b1;
+                frontend_time_step_r <= frontend_next_time_step_r[$clog2(P_T_MAX)-1:0];
+                frontend_next_time_step_r <= frontend_next_time_step_r + 1'b1;
+            end
+        end
+    end
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -245,17 +291,42 @@ module snn_top #(
             conv_layer_actual_start_r <= 1'b0;
         end else begin
             conv_layer_actual_start_r <= 1'b0;
-            if (cu_linear_layer_start) begin
+            if (i_start_new_image_processing) begin
+                conv_layer_start_pending_r <= 1'b0;
+            end else if (frontend_poisson_en_r) begin
                 conv_layer_start_pending_r <= 1'b1;
             end
-            // 只有当当前时间步的泊松脉冲真正产生出来以后，
-            // 才正式启动卷积层。
-            if (conv_layer_start_pending_r && encoded_spikes_valid) begin
+
+            /*
+             * 只有当当前时间步的泊松脉冲真正产生出来，且写 buffer 可用时，
+             * 才正式启动卷积层，防止提前覆盖尚未释放的 current buffer。
+             */
+            if (conv_layer_start_pending_r &&
+                encoded_spikes_valid &&
+                conv_current_write_ready &&
+                !conv_layer_busy_r) begin
                 conv_layer_actual_start_r <= 1'b1;
                 conv_layer_start_pending_r <= 1'b0;
             end
         end
     end
+
+    /*
+     * 卷积写流忙标志。
+     * 前端发射器用它保证 conv_layer_parallel 同一时刻只处理一个时间步。
+     */
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            conv_layer_busy_r <= 1'b0;
+        end else if (i_start_new_image_processing) begin
+            conv_layer_busy_r <= 1'b0;
+        end else if (conv_layer_actual_start_r) begin
+            conv_layer_busy_r <= 1'b1;
+        end else if (conv_current_wr_done) begin
+            conv_layer_busy_r <= 1'b0;
+        end
+    end
+
 
     conv_layer_parallel #(
         .P_INPUT_HEIGHT             (P_INPUT_HEIGHT),
@@ -291,7 +362,10 @@ module snn_top #(
     ) u_conv_current_pingpong_buffer (
         .clk                    (clk),
         .rst_n                  (rst_n),
-        .i_clear                (conv_layer_actual_start_r),
+        .i_flush                (i_start_new_image_processing),
+        .i_clear                (1'b0),
+        .i_write_start          (conv_layer_actual_start_r),
+        .i_write_spike_vector   (encoded_spikes),
         .i_current_ch0_wr_en    (conv_current_ch0_wr_en),
         .i_current_ch0_wr_addr  (conv_current_ch0_wr_addr),
         .i_current_ch0_wr_data  (conv_current_ch0_wr_data),
@@ -301,6 +375,8 @@ module snn_top #(
         .i_current_ch1_wr_data  (conv_current_ch1_wr_data),
         .i_current_ch1_wr_active(conv_current_ch1_wr_active),
         .i_current_wr_done      (conv_current_wr_done),
+        .i_read_start           (conv_lif_actual_enable_r),
+        .i_release_read_buffer  (conv_lif_spikes_valid),
         .i_current_ch0_rd_en    (conv_current_ch0_rd_en),
         .i_current_ch0_rd_addr  (conv_current_ch0_rd_addr),
         .o_current_ch0_rd_data  (conv_current_ch0_rd_data),
@@ -314,6 +390,9 @@ module snn_top #(
         .o_current_rd_data      (conv_current_ram_rd_data),
         .o_current_rd_valid     (conv_current_ram_rd_valid),
         .o_current_buffer_ready (conv_current_ram_ready),
+        .o_write_ready          (conv_current_write_ready),
+        .o_read_valid           (conv_current_read_valid),
+        .o_read_spike_vector    (conv_current_read_spikes),
         .o_write_buffer_sel     (),
         .o_read_buffer_sel      (),
         .o_buffer_valid_bits    (),
@@ -322,10 +401,20 @@ module snn_top #(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
+            conv_lif_control_pending_r <= 1'b0;
             conv_lif_enable_pending_r <= 1'b0;
             conv_lif_actual_enable_r <= 1'b0;
         end else begin
             conv_lif_actual_enable_r <= 1'b0;
+
+            if (i_start_new_image_processing) begin
+                conv_lif_control_pending_r <= 1'b0;
+                conv_lif_enable_pending_r <= 1'b0;
+            end
+
+            if (cu_lif_layer_en) begin
+                conv_lif_control_pending_r <= 1'b1;
+            end
 
             if (conv_lif_input_ready_w) begin
                 conv_lif_enable_pending_r <= 1'b1;
@@ -333,10 +422,12 @@ module snn_top #(
 
             /*
              * 并行卷积层可能早于 conv_lif_layer 的清零阶段完成。
-             * 因此先记住卷积结果已有效，等卷积后 LIF 真正 ready 后再发启动脉冲。
+             * 因此分别记住“控制单元允许处理本时间步”和“卷积电流已有效”，
+             * 只有二者同时满足才启动 conv_lif，避免 AER/FC 后级跨时间步乱序。
              */
-            if (conv_lif_enable_pending_r && conv_lif_layer_ready) begin
+            if (conv_lif_control_pending_r && conv_lif_enable_pending_r && conv_lif_layer_ready) begin
                 conv_lif_actual_enable_r <= 1'b1;
+                conv_lif_control_pending_r <= 1'b0;
                 conv_lif_enable_pending_r <= 1'b0;
             end
         end
@@ -367,7 +458,7 @@ module snn_top #(
                 .clk                    (clk),
                 .rst_n                  (rst_n),
                 .i_enable_layer         (conv_lif_actual_enable_r),
-                .i_input_spike_vector   (encoded_spikes),
+                .i_input_spike_vector   (conv_current_read_spikes),
                 .i_current_valid_bitmap (conv_current_valid_bitmap),
                 .i_all_currents_I       (conv_currents),
                 .i_current_ch0_rd_data  (conv_current_ch0_rd_data),
@@ -409,7 +500,7 @@ module snn_top #(
                 .clk                    (clk),
                 .rst_n                  (rst_n),
                 .i_enable_layer         (conv_lif_actual_enable_r),
-                .i_input_spike_vector   (encoded_spikes),
+                .i_input_spike_vector   (conv_current_read_spikes),
                 .i_current_valid_bitmap (conv_current_valid_bitmap),
                 .i_all_currents_I       (conv_currents),
                 .i_current_ram_rd_data  (conv_current_ram_rd_data),

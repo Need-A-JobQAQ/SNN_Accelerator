@@ -6,9 +6,12 @@ module conv_current_pingpong_buffer #(
     // 基础控制信号
     input wire                                                          clk,
     input wire                                                          rst_n,
-    input wire                                                          i_clear,
+    input wire                                                          i_flush,
+    input wire                                                          i_clear,                // 兼容旧接口：等价于 i_write_start
 
     // 卷积电流写流输入
+    input wire                                                          i_write_start,
+    input wire [P_NUM_INPUT_PIXELS-1:0]                                 i_write_spike_vector,
     input wire                                                          i_current_ch0_wr_en,
     input wire [$clog2(P_NUM_INPUT_PIXELS)-1:0]                         i_current_ch0_wr_addr,
     input wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0]                   i_current_ch0_wr_data,
@@ -18,6 +21,8 @@ module conv_current_pingpong_buffer #(
     input wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0]                   i_current_ch1_wr_data,
     input wire                                                          i_current_ch1_wr_active,
     input wire                                                          i_current_wr_done,
+    input wire                                                          i_read_start,
+    input wire                                                          i_release_read_buffer,
 
     // current RAM 双通道读口，供 sparse/multicore 卷积后 LIF 使用
     input wire                                                          i_current_ch0_rd_en,
@@ -37,6 +42,9 @@ module conv_current_pingpong_buffer #(
 
     // current 缓存状态与有效位图
     output reg                                                          o_current_buffer_ready,
+    output wire                                                         o_write_ready,
+    output wire                                                         o_read_valid,
+    output wire [P_NUM_INPUT_PIXELS-1:0]                                 o_read_spike_vector,
     output wire                                                         o_write_buffer_sel,
     output wire                                                         o_read_buffer_sel,
     output wire [1:0]                                                   o_buffer_valid_bits,
@@ -53,6 +61,7 @@ module conv_current_pingpong_buffer #(
     localparam LP_TOTAL_FEATURES = P_NUM_OUTPUT_CHANNELS * P_NUM_INPUT_PIXELS;
     localparam LP_TOTAL_ADDR_WIDTH = $clog2(LP_TOTAL_FEATURES);
 
+    wire write_start_w;
     wire next_write_sel_w;
     wire compat_read_ch1_w;
     wire [LP_ADDR_WIDTH-1:0] compat_read_local_addr_w;
@@ -80,10 +89,16 @@ module conv_current_pingpong_buffer #(
     reg [1:0] buffer_valid_reg;
     reg [LP_TOTAL_FEATURES-1:0] valid_bitmap_buf0_reg;
     reg [LP_TOTAL_FEATURES-1:0] valid_bitmap_buf1_reg;
+    reg [P_NUM_INPUT_PIXELS-1:0] spike_vector_buf0_reg;
+    reg [P_NUM_INPUT_PIXELS-1:0] spike_vector_buf1_reg;
     reg compat_read_valid_reg;
     reg compat_read_ch1_dly_reg;
 
+    assign write_start_w = i_clear || i_write_start;
     assign next_write_sel_w = ~write_sel_reg;
+    assign o_write_ready = !buffer_valid_reg[next_write_sel_w];
+    assign o_read_valid = buffer_valid_reg[read_sel_reg];
+    assign o_read_spike_vector = read_sel_reg ? spike_vector_buf1_reg : spike_vector_buf0_reg;
     assign o_write_buffer_sel = write_sel_reg;
     assign o_read_buffer_sel = read_sel_reg;
     assign o_buffer_valid_bits = buffer_valid_reg;
@@ -174,24 +189,37 @@ module conv_current_pingpong_buffer #(
 
     /*
      * 写 buffer 选择。
-     * 当前串行版本每个新时间步切换一次写 buffer，为后续跨时间步重叠预留结构。
+     * 每次开始写入一个新时间步时切换写 buffer。
+     * 顶层真正流水后，需要先检查 o_write_ready，避免覆盖尚未释放的 buffer。
      */
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             write_sel_reg <= 1'b0;
-        end else if (i_clear) begin
+        end else if (i_flush) begin
+            write_sel_reg <= 1'b0;
+        end else if (write_start_w) begin
             write_sel_reg <= next_write_sel_w;
         end
     end
 
     /*
      * 读 buffer 选择。
-     * 某个 buffer 写完后，后级读取刚刚写完的那一套缓存。
+     * 写完成只产生 full 标志，不主动切换读侧；
+     * 后级真正启动时再锁定一个 full buffer，避免读旧时间步时被新时间步写完成打断。
      */
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             read_sel_reg <= 1'b0;
-        end else if (i_current_wr_done) begin
+        end else if (i_flush) begin
+            read_sel_reg <= 1'b0;
+        end else if (i_read_start) begin
+            if (buffer_valid_reg[0]) begin
+                read_sel_reg <= 1'b0;
+            end else if (buffer_valid_reg[1]) begin
+                read_sel_reg <= 1'b1;
+            end
+        end else if (i_current_wr_done && !buffer_valid_reg[read_sel_reg]) begin
+            // 兼容旧串行调度：若当前没有待读 buffer，写完后自动指向新结果。
             read_sel_reg <= write_sel_reg;
         end
     end
@@ -205,8 +233,11 @@ module conv_current_pingpong_buffer #(
         if (!rst_n) begin
             valid_bitmap_buf0_reg <= {LP_TOTAL_FEATURES{1'b0}};
             valid_bitmap_buf1_reg <= {LP_TOTAL_FEATURES{1'b0}};
+        end else if (i_flush) begin
+            valid_bitmap_buf0_reg <= {LP_TOTAL_FEATURES{1'b0}};
+            valid_bitmap_buf1_reg <= {LP_TOTAL_FEATURES{1'b0}};
         end else begin
-            if (i_clear && !next_write_sel_w) begin
+            if (write_start_w && !next_write_sel_w) begin
                 valid_bitmap_buf0_reg <= {LP_TOTAL_FEATURES{1'b0}};
             end else begin
                 if (buf0_ch0_wr_en_w) begin
@@ -217,7 +248,7 @@ module conv_current_pingpong_buffer #(
                 end
             end
 
-            if (i_clear && next_write_sel_w) begin
+            if (write_start_w && next_write_sel_w) begin
                 valid_bitmap_buf1_reg <= {LP_TOTAL_FEATURES{1'b0}};
             end else begin
                 if (buf1_ch0_wr_en_w) begin
@@ -231,21 +262,48 @@ module conv_current_pingpong_buffer #(
     end
 
     /*
+     * 输入脉冲向量随 current buffer 一起保存。
+     * 后级处理某个时间步时，应使用与 read buffer 对应的 spike vector，
+     * 避免流水后被下一时间步的编码结果覆盖。
+     */
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            spike_vector_buf0_reg <= {P_NUM_INPUT_PIXELS{1'b0}};
+            spike_vector_buf1_reg <= {P_NUM_INPUT_PIXELS{1'b0}};
+        end else if (i_flush) begin
+            spike_vector_buf0_reg <= {P_NUM_INPUT_PIXELS{1'b0}};
+            spike_vector_buf1_reg <= {P_NUM_INPUT_PIXELS{1'b0}};
+        end else if (write_start_w) begin
+            if (next_write_sel_w) begin
+                spike_vector_buf1_reg <= i_write_spike_vector;
+            end else begin
+                spike_vector_buf0_reg <= i_write_spike_vector;
+            end
+        end
+    end
+
+    /*
      * buffer 有效标志。
-     * 当前版本尚未接入后级 release，因此 valid 主要用于仿真观察；
-     * 后续真正跨时间步流水时，需要用它防止写侧覆盖读侧。
+     * 写完成后置 full；后级处理完成后通过 i_release_read_buffer 释放。
+     * 这个状态是后续跨时间步流水防止覆盖的核心依据。
      */
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             buffer_valid_reg <= 2'b00;
-        end else if (i_clear) begin
-            if (next_write_sel_w) begin
-                buffer_valid_reg[1] <= 1'b0;
-            end else begin
-                buffer_valid_reg[0] <= 1'b0;
+        end else if (i_flush) begin
+            buffer_valid_reg <= 2'b00;
+        end else begin
+            if (write_start_w) begin
+                buffer_valid_reg[next_write_sel_w] <= 1'b0;
             end
-        end else if (i_current_wr_done) begin
-            buffer_valid_reg[write_sel_reg] <= 1'b1;
+
+            if (i_release_read_buffer) begin
+                buffer_valid_reg[read_sel_reg] <= 1'b0;
+            end
+
+            if (i_current_wr_done) begin
+                buffer_valid_reg[write_sel_reg] <= 1'b1;
+            end
         end
     end
 
