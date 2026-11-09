@@ -45,7 +45,7 @@ module GPT_conv_parallel_compare_tb;
     wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] parallel_current_ch1_wr_data;
     wire parallel_current_ch1_wr_active;
     wire parallel_current_wr_done;
-    wire parallel_current_buffer_ready;
+    wire parallel_current_buffer_valid;
     reg parallel_current_rd_en;
     reg [($clog2(P_NUM_OUTPUT_FEATURES))-1:0] parallel_current_rd_addr;
     wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] parallel_current_rd_data;
@@ -139,7 +139,7 @@ module GPT_conv_parallel_compare_tb;
         .i_current_rd_addr          (parallel_current_rd_addr),
         .o_current_rd_data          (parallel_current_rd_data),
         .o_current_rd_valid         (parallel_current_rd_valid),
-        .o_current_buffer_ready     (parallel_current_buffer_ready),
+        .o_current_buffer_valid     (parallel_current_buffer_valid),
         .o_write_ready              (),
         .o_read_valid               (),
         .o_read_spike_vector        (),
@@ -149,7 +149,7 @@ module GPT_conv_parallel_compare_tb;
         .o_current_valid_bitmap     ()
     );
 
-    assign parallel_valid = parallel_current_buffer_ready;
+    assign parallel_valid = parallel_current_buffer_valid;
 
     initial begin
         tb_clk = 1'b0;

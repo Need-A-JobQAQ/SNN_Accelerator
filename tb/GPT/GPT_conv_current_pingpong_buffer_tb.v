@@ -36,7 +36,7 @@ module GPT_conv_current_pingpong_buffer_tb;
     reg [LP_TOTAL_ADDR_WIDTH-1:0] i_current_rd_addr;
     wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] o_current_rd_data;
     wire o_current_rd_valid;
-    wire o_current_buffer_ready;
+    wire o_current_buffer_valid;
     wire o_write_ready;
     wire o_read_valid;
     wire [P_NUM_INPUT_PIXELS-1:0] o_read_spike_vector;
@@ -79,7 +79,7 @@ module GPT_conv_current_pingpong_buffer_tb;
         .i_current_rd_addr          (i_current_rd_addr),
         .o_current_rd_data          (o_current_rd_data),
         .o_current_rd_valid         (o_current_rd_valid),
-        .o_current_buffer_ready     (o_current_buffer_ready),
+        .o_current_buffer_valid     (o_current_buffer_valid),
         .o_write_ready              (o_write_ready),
         .o_read_valid               (o_read_valid),
         .o_read_spike_vector        (o_read_spike_vector),

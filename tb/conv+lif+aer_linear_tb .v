@@ -54,7 +54,7 @@ module conv_lif_aer_tb();
     wire signed [P_NUM_OUTPUT_CHANNELS * P_NUM_INPUT_PIXELS - 1:0][P_NEURON_VALUE_TOTAL_BITS-1:0] 
           w_all_currents_I         ; //
     wire  w_all_currents_valid     ; //妯�?�潡闂村唴閮ㄤ俊�??
-    wire w_current_ram_ready                            ;
+    wire w_current_buffer_valid                         ;
     wire w_current_ram_rd_en                            ;
     wire [LP_CONV_AER_ADDR_WIDTH-1:0] w_current_ram_rd_addr;
     wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] w_current_ram_rd_data;
@@ -98,9 +98,9 @@ module conv_lif_aer_tb();
     wire tb_neuron_currents_valid               ;
 
     assign w_conv_lif_input_ready = (P_USE_SPARSE_CONV_LIF || P_FORCE_MULTICORE_CONV_LIF) ?
-                                    w_current_ram_ready : w_all_currents_valid;
+                                    w_current_buffer_valid : w_all_currents_valid;
     assign w_all_currents_I = {P_NUM_NEURONS * P_NEURON_VALUE_TOTAL_BITS{1'b0}};
-    assign w_all_currents_valid = w_current_ram_ready;
+    assign w_all_currents_valid = w_current_buffer_valid;
 
 
     conv_layer_parallel #(
@@ -164,7 +164,7 @@ module conv_lif_aer_tb();
         .i_current_rd_addr           (w_current_ram_rd_addr),
         .o_current_rd_data           (w_current_ram_rd_data),
         .o_current_rd_valid          (w_current_ram_rd_valid),
-        .o_current_buffer_ready      (w_current_ram_ready),
+        .o_current_buffer_valid      (w_current_buffer_valid),
         .o_write_ready               (),
         .o_read_valid                (),
         .o_read_spike_vector         (),

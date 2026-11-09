@@ -23,6 +23,7 @@ module snn_top #(
     parameter P_USE_SPARSE_CONV_LIF = 0,
     parameter P_USE_MULTICORE_CONV_LIF = 0,
     parameter P_USE_BLOCK_AER_FC = 0,
+    parameter P_USE_EVENT_DRIVEN_CONV = 0,
     parameter P_AER_ARB_POLICY = 1
 ) (
     input wire clk,
@@ -53,7 +54,12 @@ module snn_top #(
     localparam LP_BLOCK_AER_SIZE = 32;
     localparam LP_BLOCK_AER_ID_WIDTH = $clog2((LP_NUM_CONV_FEATURES + LP_BLOCK_AER_SIZE - 1) / LP_BLOCK_AER_SIZE);
     localparam [31:0] LP_NUM_CONV_FEATURES_32 = LP_NUM_CONV_FEATURES;
-    localparam LP_CORE_FIFO_COUNT_WIDTH = $clog2(512 + 1);
+    localparam LP_CORE_EVENT_FIFO_DEPTH = 32;
+    localparam LP_AER_EVENT_FIFO_DEPTH = 512;
+    localparam LP_BLOCK_EVENT_FIFO_DEPTH = 128;
+    localparam LP_CORE_FIFO_COUNT_WIDTH = $clog2(LP_CORE_EVENT_FIFO_DEPTH + 1);
+    localparam LP_AER_FIFO_COUNT_WIDTH = $clog2(LP_AER_EVENT_FIFO_DEPTH + 1);
+    localparam LP_BLOCK_FIFO_COUNT_WIDTH = $clog2(LP_BLOCK_EVENT_FIFO_DEPTH + 1);
 
     wire [$clog2(P_T_MAX)-1:0] cu_current_time_step_t;
     wire cu_poisson_encoder_en;
@@ -85,7 +91,11 @@ module snn_top #(
     wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] conv_current_ch1_wr_data;
     wire conv_current_ch1_wr_active;
     wire conv_current_wr_done;
-    wire conv_current_ram_ready;
+    wire [31:0] event_conv_total_retired_pixels;
+    wire [31:0] event_conv_total_current_ram_writes;
+    wire [31:0] event_conv_skipped_clean_retirements;
+    wire [31:0] event_conv_priority_search_count;
+    wire conv_current_buffer_valid;
     wire conv_current_ram_rd_en;
     wire [LP_CONV_AER_ADDR_WIDTH-1:0] conv_current_ram_rd_addr;
     wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] conv_current_ram_rd_data;
@@ -102,7 +112,7 @@ module snn_top #(
     wire [P_NUM_INPUT_PIXELS-1:0] conv_current_read_spikes;
     wire conv_current_write_ready;
     wire conv_current_read_valid;
-    wire conv_lif_input_ready_w;
+    wire conv_lif_input_valid_w;
     wire [LP_NUM_CONV_FEATURES-1:0] conv_lif_output_spikes;
     wire conv_lif_spikes_valid;
     wire conv_lif_layer_ready;
@@ -121,7 +131,7 @@ module snn_top #(
     wire [LP_CONV_AER_ADDR_WIDTH-1:0] fifo_event_addr;
     wire fifo_empty;
     wire fifo_full;
-    wire [$clog2(2048 + 1)-1:0] fifo_count;
+    wire [LP_AER_FIFO_COUNT_WIDTH-1:0] fifo_count;
     wire fifo_overflow;
     wire aer_event_valid;
     wire [LP_CONV_AER_ADDR_WIDTH-1:0] aer_event_addr;
@@ -139,7 +149,7 @@ module snn_top #(
     wire [LP_BLOCK_AER_SIZE-1:0] block_fifo_mask;
     wire block_fifo_empty;
     wire block_fifo_full;
-    wire [$clog2(512 + 1)-1:0] block_fifo_count;
+    wire [LP_BLOCK_FIFO_COUNT_WIDTH-1:0] block_fifo_count;
     wire block_fifo_overflow;
     wire block_fifo_read_ready;
     wire block_linear_ready;
@@ -147,15 +157,15 @@ module snn_top #(
     reg block_frame_done_pending_r;
     wire perf_aer_event_accept_w;
 
-    assign conv_lif_input_ready_w = (P_USE_SPARSE_CONV_LIF || P_USE_MULTICORE_CONV_LIF) ?
-                                    conv_current_ram_ready : conv_currents_valid;
+    assign conv_lif_input_valid_w = (P_USE_SPARSE_CONV_LIF || P_USE_MULTICORE_CONV_LIF) ?
+                                    conv_current_buffer_valid : conv_currents_valid;
     /*
      * conv_layer_parallel 已精简为写流输出模块，不再维护旧版完整电流数组。
      * 当前主数据通路使用 conv_current_pingpong_buffer 的 RAM 读口；
      * 这里保留零值占位，避免旧 dense 路径出现无驱动信号。
      */
     assign conv_currents = {LP_NUM_CONV_FEATURES * P_NEURON_VALUE_TOTAL_BITS{1'b0}};
-    assign conv_currents_valid = conv_current_ram_ready;
+    assign conv_currents_valid = conv_current_buffer_valid;
 
     wire signed [P_NUM_OUTPUT_NEURONS-1:0][P_NEURON_VALUE_TOTAL_BITS-1:0] neuron_currents;
     wire neuron_currents_valid;
@@ -327,7 +337,6 @@ module snn_top #(
         end
     end
 
-
     conv_layer_parallel #(
         .P_INPUT_HEIGHT             (P_INPUT_HEIGHT),
         .P_INPUT_WIDTH              (P_INPUT_WIDTH),
@@ -337,6 +346,7 @@ module snn_top #(
         .P_PADDING                  (P_CONV_PADDING),
         .P_WEIGHT_BIT_WIDTH         (P_WEIGHT_BIT_WIDTH),
         .P_NEURON_VALUE_TOTAL_BITS  (P_NEURON_VALUE_TOTAL_BITS),
+        .P_USE_EVENT_DRIVEN_CONV    (P_USE_EVENT_DRIVEN_CONV),
         .P_CONV0_WEIGHTS_PACKED     (P_CONV0_WEIGHTS_PACKED),
         .P_CONV1_WEIGHTS_PACKED     (P_CONV1_WEIGHTS_PACKED)
     ) u_conv_layer_parallel (
@@ -352,7 +362,11 @@ module snn_top #(
         .o_current_ch1_wr_addr  (conv_current_ch1_wr_addr),
         .o_current_ch1_wr_data  (conv_current_ch1_wr_data),
         .o_current_ch1_wr_active(conv_current_ch1_wr_active),
-        .o_current_wr_done      (conv_current_wr_done)
+        .o_current_wr_done      (conv_current_wr_done),
+        .o_total_retired_pixels (event_conv_total_retired_pixels),
+        .o_total_current_ram_writes(event_conv_total_current_ram_writes),
+        .o_skipped_clean_retirements(event_conv_skipped_clean_retirements),
+        .o_priority_search_count(event_conv_priority_search_count)
     );
 
     conv_current_pingpong_buffer #(
@@ -389,7 +403,7 @@ module snn_top #(
         .i_current_rd_addr      (conv_current_ram_rd_addr),
         .o_current_rd_data      (conv_current_ram_rd_data),
         .o_current_rd_valid     (conv_current_ram_rd_valid),
-        .o_current_buffer_ready (conv_current_ram_ready),
+        .o_current_buffer_valid (conv_current_buffer_valid),
         .o_write_ready          (conv_current_write_ready),
         .o_read_valid           (conv_current_read_valid),
         .o_read_spike_vector    (conv_current_read_spikes),
@@ -416,7 +430,7 @@ module snn_top #(
                 conv_lif_control_pending_r <= 1'b1;
             end
 
-            if (conv_lif_input_ready_w) begin
+            if (conv_lif_input_valid_w) begin
                 conv_lif_enable_pending_r <= 1'b1;
             end
 
@@ -452,7 +466,7 @@ module snn_top #(
                 .P_NEURON_VALUE_TOTAL_BITS   (P_NEURON_VALUE_TOTAL_BITS),
                 .P_NEURON_VALUE_FRAC_BITS    (P_NEURON_VALUE_FRAC_BITS),
                 .P_SKIP_THRESHOLD_SHIFT      (5),
-                .P_CORE_EVENT_FIFO_DEPTH     (512),
+                .P_CORE_EVENT_FIFO_DEPTH     (LP_CORE_EVENT_FIFO_DEPTH),
                 .P_ARB_POLICY                (P_AER_ARB_POLICY)
             ) u_conv_lif_sparse_multicore (
                 .clk                    (clk),
@@ -559,7 +573,7 @@ module snn_top #(
     endgenerate
     aer_event_fifo #(
         .P_ADDR_WIDTH           (LP_CONV_AER_ADDR_WIDTH),
-        .P_FIFO_DEPTH           (2048)
+        .P_FIFO_DEPTH           (LP_AER_EVENT_FIFO_DEPTH)
     ) u_aer_event_fifo (
         .clk                    (clk),
         .rst_n                  (rst_n),
@@ -640,7 +654,7 @@ module snn_top #(
             block_event_fifo #(
                 .P_BLOCK_ID_WIDTH      (LP_BLOCK_AER_ID_WIDTH),
                 .P_BLOCK_SIZE          (LP_BLOCK_AER_SIZE),
-                .P_FIFO_DEPTH          (512)
+                .P_FIFO_DEPTH          (LP_BLOCK_EVENT_FIFO_DEPTH)
             ) u_block_event_fifo (
                 .clk                    (clk),
                 .rst_n                  (rst_n),
@@ -694,7 +708,7 @@ module snn_top #(
             assign block_fifo_mask = {LP_BLOCK_AER_SIZE{1'b0}};
             assign block_fifo_empty = 1'b1;
             assign block_fifo_full = 1'b0;
-            assign block_fifo_count = {($clog2(512 + 1)){1'b0}};
+            assign block_fifo_count = {LP_BLOCK_FIFO_COUNT_WIDTH{1'b0}};
             assign block_fifo_overflow = 1'b0;
             assign block_fifo_read_ready = 1'b0;
             assign block_linear_ready = 1'b0;
@@ -823,7 +837,7 @@ module snn_top #(
                 perf_current_conv_cycles_r <= 32'd0;
                 o_perf_last_conv_cycles <= 32'd0;
                 o_perf_total_conv_cycles <= 32'd0;
-            end else if (conv_layer_actual_start_r && conv_current_ram_ready) begin
+            end else if (conv_layer_actual_start_r && conv_current_buffer_valid) begin
                 perf_conv_active_r <= 1'b0;
                 perf_current_conv_cycles_r <= 32'd0;
                 o_perf_last_conv_cycles <= 32'd1;
@@ -831,7 +845,7 @@ module snn_top #(
             end else if (conv_layer_actual_start_r) begin
                 perf_conv_active_r <= 1'b1;
                 perf_current_conv_cycles_r <= 32'd1;
-            end else if (perf_conv_active_r && conv_current_ram_ready) begin
+            end else if (perf_conv_active_r && conv_current_buffer_valid) begin
                 perf_conv_active_r <= 1'b0;
                 perf_current_conv_cycles_r <= 32'd0;
                 o_perf_last_conv_cycles <= perf_current_conv_cycles_r;

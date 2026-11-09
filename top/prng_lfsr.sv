@@ -19,6 +19,9 @@ module prng_lfsr #(
 
     // LFSR 内部状态寄存器
     reg [P_PRNG_LFSR_WIDTH-1:0] lfsr_reg;
+    reg [P_PRNG_LFSR_WIDTH-1:0] base_seed;
+    reg [P_PRNG_LFSR_WIDTH-1:0] id_contribution;
+    reg [P_PRNG_LFSR_WIDTH-1:0] initial_seed_calc;
 
     // LFSR 反馈逻辑 (斐波那契 LFSR)
     // 新的最低有效位 (LSB) 是由当前状态的某些位的异或产生的，然后整个寄存器逻辑左移。
@@ -41,9 +44,6 @@ module prng_lfsr #(
         if (!rst_n) begin
             // 基于 INSTANCE_ID 和一个基础值生成初始种子，并确保种子不为全零
             // 全零状态会导致LFSR卡死。
-            automatic logic [P_PRNG_LFSR_WIDTH-1:0] base_seed;
-            automatic logic [P_PRNG_LFSR_WIDTH-1:0] id_contribution;
-            automatic logic [P_PRNG_LFSR_WIDTH-1:0] initial_seed_calc;
             base_seed = P_PRNG_LFSR_WIDTH'('hACE1F00D); // 一个常用的非零基础值
             // 更复杂地混合 INSTANCE_ID 以产生更大差异
             // 1. 将 INSTANCE_ID 乘以一个大的奇数（帮助打乱比特位）

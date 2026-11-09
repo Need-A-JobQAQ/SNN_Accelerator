@@ -41,7 +41,7 @@ module conv_lif_tb();
          all_currents_I;
     wire all_currents_valid;
 
-    wire current_ram_ready;
+    wire current_buffer_valid;
     wire current_ram_rd_en;
     wire [$clog2(P_NUM_NEURONS)-1:0] current_ram_rd_addr;
     wire signed [P_NEURON_VALUE_TOTAL_BITS-1:0] current_ram_rd_data;
@@ -61,7 +61,7 @@ module conv_lif_tb();
     wire [31:0] tb_update_count;
 
     assign all_currents_I = {P_NUM_NEURONS * P_NEURON_VALUE_TOTAL_BITS{1'b0}};
-    assign all_currents_valid = current_ram_ready;
+    assign all_currents_valid = current_buffer_valid;
 
     conv_layer_parallel #(
         .P_INPUT_HEIGHT             (P_INPUT_HEIGHT),
@@ -124,7 +124,7 @@ module conv_lif_tb();
         .i_current_rd_addr          (current_ram_rd_addr),
         .o_current_rd_data          (current_ram_rd_data),
         .o_current_rd_valid         (current_ram_rd_valid),
-        .o_current_buffer_ready     (current_ram_ready),
+        .o_current_buffer_valid     (current_buffer_valid),
         .o_write_ready              (),
         .o_read_valid               (),
         .o_read_spike_vector        (),
@@ -142,7 +142,7 @@ module conv_lif_tb();
             r_enable_layer <= 1'b0;
 
             // current RAM 写完可能早于 LIF 清零完成，所以先记住请求。
-            if (current_ram_ready) begin
+            if (current_buffer_valid) begin
                 r_enable_layer_pending <= 1'b1;
             end
 

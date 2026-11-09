@@ -36,7 +36,7 @@ module conv_current_buffer #(
     output reg                                                          o_current_rd_valid,
 
     // current 缓存状态与有效位图
-    output reg                                                          o_current_buffer_ready,
+    output reg                                                          o_current_buffer_valid,
     output reg [P_NUM_OUTPUT_CHANNELS * P_NUM_INPUT_PIXELS - 1:0]        o_current_valid_bitmap
 );
 
@@ -132,9 +132,9 @@ module conv_current_buffer #(
      */
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            o_current_buffer_ready <= 1'b0;
+            o_current_buffer_valid <= 1'b0;
         end else begin
-            o_current_buffer_ready <= i_current_wr_done;
+            o_current_buffer_valid <= i_current_wr_done;
         end
     end
 

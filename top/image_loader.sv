@@ -1,10 +1,10 @@
 // image_loader.v
 // 从外部BRAM IP核中读取图像像素数据，并存储到内部寄存器阵列中。
-// 采用流水线方式读取BRAM，并按指定顺序填充内部图像缓冲区。
+// 采用流水线方式读取BRAM，并按指定顺序填充输出图像缓冲区。
 // 假设BRAM的输出数据 i_bram_dout_raw [63:0] 的打包方式为：
 //   i_bram_dout_raw[63:56] 存储该8像素组中的第0个逻辑像素（光栅顺序最靠前）。
 //   i_bram_dout_raw[7:0]   存储该8像素组中的第7个逻辑像素（光栅顺序最靠后）。
-// 内部图像缓冲区 image_pixel_buffer_reg 和输出 o_image_buffer_out 的索引方式为：
+// 输出图像缓冲区 o_image_buffer_out 的索引方式为：
 //   [P_NUM_INPUT_PIXELS-1] (例如[783]) 对应图像的左上角(光栅索引0)。
 //   [0] 对应图像的右下角(光栅索引 P_NUM_INPUT_PIXELS-1)。
 // 输入是按照光栅扫描顺序存取，高位(数字大的索引)对应的是光栅起始也即图片左上角，低位(数字小的索引)对应的是光栅终止也即右下角。
@@ -50,10 +50,6 @@ module image_loader #(
 
     reg [STATE_BITS_FSM-1:0] current_state_reg, next_state_reg; // FSM当前状态和下一状态寄存器
 
-    // ------------ 内部图像缓冲区 ------------
-    // 用于逐行存储从BRAM加载的像素数据，索引方式: image_pixel_buffer_reg[P_NUM_INPUT_PIXELS-1] 对应光栅扫描的第一个像素(左上角)
-    reg [P_PIXEL_INTENSITY_BITS-1:0] image_pixel_buffer_reg [P_NUM_INPUT_PIXELS-1:0];
-
     // ------------ BRAM地址和有效位流水线寄存器 ------------
     // 用于将发往BRAM的地址和其有效性标志打拍，以匹配BRAM的读取延迟，确保数据对齐。
     // 深度为 BRAM_READ_LATENCY 2级。
@@ -83,10 +79,9 @@ module image_loader #(
             written_bram_word_count_reg<= {LP_BRAM_CTRL_WIDTH{1'b0}};
             o_loading_busy             <= 1'b0;
             o_load_done                <= 1'b0;
-            // 初始化内部缓冲区和输出缓冲区为0
+            // 初始化输出缓冲区为0
             for (k_init_loop = 0; k_init_loop < P_NUM_INPUT_PIXELS; k_init_loop = k_init_loop + 1) begin
-                o_image_buffer_out[k_init_loop]     <= {P_PIXEL_INTENSITY_BITS{1'b0}};
-                image_pixel_buffer_reg[k_init_loop] <= {P_PIXEL_INTENSITY_BITS{1'b0}};
+                o_image_buffer_out[k_init_loop] <= {P_PIXEL_INTENSITY_BITS{1'b0}};
             end
             // 初始化流水线寄存器
             for (k_init_loop = 0; k_init_loop < BRAM_READ_LATENCY; k_init_loop = k_init_loop + 1) begin
@@ -120,7 +115,7 @@ module image_loader #(
                 // 如果 o_bram_ena 为0，addr_pipeline_reg[0] 的值不重要（或保持原值），因为 valid_pipeline_reg[0] 会是0
             end
 
-            // 当流水线末端数据有效时，将从BRAM读出的数据解包并写入内部图像缓冲区
+            // 当流水线末端数据有效时，将从BRAM读出的数据解包并直接写入输出图像缓冲区
             // 注意由于数据滞后地址两个时钟，因此 valid_pipeline_reg[1] 对应的数据在 i_bram_dout_raw 中
             if ((current_state_reg == S_LOADING_FSM || current_state_reg == S_FLUSH_PIPE_FSM) && valid_pipeline_reg[BRAM_READ_LATENCY-1]) begin
                 /*
@@ -142,11 +137,11 @@ module image_loader #(
                     // 假设 pix_in_word_local=0 对应 i_bram_dout_raw 的最高8位 (光栅最前)
                     //     pix_in_word_local=7 对应 i_bram_dout_raw 的最低8位 (光栅最后)
                     current_pixel_val_local = i_bram_dout_raw[(P_IMAGE_BRAM_DATA_WIDTH - 1 - (pix_in_word_local * P_PIXEL_INTENSITY_BITS)) -: P_PIXEL_INTENSITY_BITS];
-                    // 该像素在内部图像缓冲区中的目标索引
+                    // 该像素在输出图像缓冲区中的目标索引
                     // 目标索引计算：高索引存光栅起始像素
                     target_buffer_idx_local = P_NUM_INPUT_PIXELS - 1 - (base_pixel_global_idx_local + pix_in_word_local);
                     if (target_buffer_idx_local >= 0 && target_buffer_idx_local < P_NUM_INPUT_PIXELS) begin // 边界检查
-                        image_pixel_buffer_reg[target_buffer_idx_local] <= current_pixel_val_local;
+                        o_image_buffer_out[target_buffer_idx_local] <= current_pixel_val_local;
                     end
                 end
                 written_bram_word_count_reg <= written_bram_word_count_reg + 1; // 已写入缓冲区的BRAM字计数增加
@@ -164,10 +159,6 @@ module image_loader #(
             if (current_state_reg == S_DONE_LOAD_FSM) begin
                 o_load_done    <= 1'b1;         // 发出加载完成脉冲
                 o_loading_busy <= 1'b0;         // 加载不再繁忙
-                // 将内部缓冲区的图像数据赋给输出端口
-                for (k_init_loop = 0; k_init_loop < P_NUM_INPUT_PIXELS; k_init_loop = k_init_loop + 1) begin
-                    o_image_buffer_out[k_init_loop] <= image_pixel_buffer_reg[k_init_loop];
-                end
             end
         end
     end

@@ -41,7 +41,7 @@ module conv_current_pingpong_buffer #(
     output reg                                                          o_current_rd_valid,
 
     // current 缓存状态与有效位图
-    output reg                                                          o_current_buffer_ready,
+    output reg                                                          o_current_buffer_valid,
     output wire                                                         o_write_ready,
     output wire                                                         o_read_valid,
     output wire [P_NUM_INPUT_PIXELS-1:0]                                 o_read_spike_vector,
@@ -265,6 +265,8 @@ module conv_current_pingpong_buffer #(
      * 输入脉冲向量随 current buffer 一起保存。
      * 后级处理某个时间步时，应使用与 read buffer 对应的 spike vector，
      * 避免流水后被下一时间步的编码结果覆盖。
+     * row-stream 前端在写入开始时还没有完整 spike vector，因此这里在
+     * current 写完成时锁存，此时该时间步的行编码也已经完成。
      */
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -273,8 +275,8 @@ module conv_current_pingpong_buffer #(
         end else if (i_flush) begin
             spike_vector_buf0_reg <= {P_NUM_INPUT_PIXELS{1'b0}};
             spike_vector_buf1_reg <= {P_NUM_INPUT_PIXELS{1'b0}};
-        end else if (write_start_w) begin
-            if (next_write_sel_w) begin
+        end else if (i_current_wr_done) begin
+            if (write_sel_reg) begin
                 spike_vector_buf1_reg <= i_write_spike_vector;
             end else begin
                 spike_vector_buf0_reg <= i_write_spike_vector;
@@ -308,13 +310,13 @@ module conv_current_pingpong_buffer #(
     end
 
     /*
-     * current 缓存完成脉冲。
+     * current 缓存写完成有效脉冲。
      */
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            o_current_buffer_ready <= 1'b0;
+            o_current_buffer_valid <= 1'b0;
         end else begin
-            o_current_buffer_ready <= i_current_wr_done;
+            o_current_buffer_valid <= i_current_wr_done;
         end
     end
 

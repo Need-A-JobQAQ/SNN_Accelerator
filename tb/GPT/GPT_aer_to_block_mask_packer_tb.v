@@ -139,7 +139,7 @@ module GPT_aer_to_block_mask_packer_tb;
             error_count = error_count + 1;
         end
 
-        // 清空后验证反压：旧 block 未被接收时，新 block 事件不能被吞掉。
+        // 清空后验证反压：4 个聚合 entry 全满后，新 block 事件不能被吞掉。
         i_clear <= 1'b1;
         @(posedge clk);
         i_clear <= 1'b0;
@@ -147,9 +147,12 @@ module GPT_aer_to_block_mask_packer_tb;
 
         send_event(11'd0);
         send_event(11'd1);
+        send_event(11'd32);
+        send_event(11'd64);
+        send_event(11'd96);
 
         i_block_ready <= 1'b0;
-        i_event_addr <= 11'd32;
+        i_event_addr <= 11'd128;
         i_event_valid <= 1'b1;
         @(posedge clk);
         if (o_event_ready !== 1'b0 || o_block_valid !== 1'b1) begin
@@ -166,14 +169,17 @@ module GPT_aer_to_block_mask_packer_tb;
         i_event_valid <= 1'b0;
         i_event_addr <= {P_EVENT_ADDR_WIDTH{1'b0}};
         send_frame_done();
-        repeat (4) @(posedge clk);
+        repeat (8) @(posedge clk);
 
-        if (recv_count !== 2) begin
-            $display("[%0t ns] SIM_ERROR: backpressure case expected 2 blocks, got %0d.", $time, recv_count);
+        if (recv_count !== 5) begin
+            $display("[%0t ns] SIM_ERROR: backpressure case expected 5 blocks, got %0d.", $time, recv_count);
             error_count = error_count + 1;
         end
         check_block(0, 6'd0, 32'h0000_0003);
-        check_block(1, 6'd1, 32'h0000_0001);
+        check_block(1, 6'd4, 32'h0000_0001);
+        check_block(2, 6'd1, 32'h0000_0001);
+        check_block(3, 6'd2, 32'h0000_0001);
+        check_block(4, 6'd3, 32'h0000_0001);
 
         // 清空后验证空帧：没有 pending block 时，frame_done 也应产生一个结束脉冲。
         i_clear <= 1'b1;

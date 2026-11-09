@@ -30,6 +30,7 @@ module snn_top_tb;
     localparam P_USE_SPARSE_CONV_LIF       = 0;
     localparam P_USE_MULTICORE_CONV_LIF    = 1;
     localparam P_USE_BLOCK_AER_FC          = 1;
+    localparam P_USE_EVENT_DRIVEN_CONV     = 1;
     localparam P_CONV_WEIGHT_PACKED_WIDTH  = P_CONV_KERNEL_SIZE * P_CONV_KERNEL_SIZE * P_WEIGHT_BIT_WIDTH;
     localparam [P_CONV_WEIGHT_PACKED_WIDTH-1:0] P_CONV0_WEIGHTS_PACKED = {16'hFA52,16'h1085,16'hFF5B,
                                                                           16'h0602,16'h0A60,16'hF5AA,
@@ -83,16 +84,47 @@ module snn_top_tb;
     reg [LP_BLOCK32_COUNT-1:0] stat_block32_seen;
     reg [LP_BLOCK64_COUNT-1:0] stat_block64_seen;
     reg [LP_WEIGHT_GROUP4_COUNT-1:0] stat_group4_seen;
+    reg [LP_BLOCK32_COUNT-1:0] stat_actual_block32_seen;
+    reg [5:0]                  stat_recent_block_id [0:7];
+    reg [7:0]                  stat_recent_block_valid;
     integer                    stat_aer_events_total;
     integer                    stat_block16_packets_total;
     integer                    stat_block32_packets_total;
     integer                    stat_block64_packets_total;
     integer                    stat_group4_reads_total;
+    integer                    stat_actual_block32_packets_total;
+    integer                    stat_actual_block32_repeated_total;
+    integer                    stat_actual_block32_popcount_total;
+    integer                    stat_actual_block32_single_bit_total;
+    integer                    stat_actual_block32_recent2_hit_total;
+    integer                    stat_actual_block32_recent4_hit_total;
+    integer                    stat_actual_block32_recent8_hit_total;
     integer                    stat_aer_events_last;
     integer                    stat_block16_packets_last;
     integer                    stat_block32_packets_last;
     integer                    stat_block64_packets_last;
     integer                    stat_group4_reads_last;
+    integer                    stat_actual_block32_packets_last;
+    integer                    stat_actual_block32_repeated_last;
+    integer                    stat_actual_block32_popcount_last;
+    integer                    stat_actual_block32_single_bit_last;
+    integer                    stat_actual_block32_recent2_hit_last;
+    integer                    stat_actual_block32_recent4_hit_last;
+    integer                    stat_actual_block32_recent8_hit_last;
+    integer                    stat_idx;
+
+    function integer tb_popcount32;
+        input [31:0] value;
+        integer bit_idx;
+        begin
+            tb_popcount32 = 0;
+            for (bit_idx = 0; bit_idx < 32; bit_idx = bit_idx + 1) begin
+                if (value[bit_idx]) begin
+                    tb_popcount32 = tb_popcount32 + 1;
+                end
+            end
+        end
+    endfunction
 
 
     // --- DUT (snn_top) 实例化 ---
@@ -118,7 +150,8 @@ module snn_top_tb;
         .P_CONV1_WEIGHTS_PACKED     (P_CONV1_WEIGHTS_PACKED),
         .P_USE_SPARSE_CONV_LIF      (P_USE_SPARSE_CONV_LIF),
         .P_USE_MULTICORE_CONV_LIF   (P_USE_MULTICORE_CONV_LIF),
-        .P_USE_BLOCK_AER_FC         (P_USE_BLOCK_AER_FC)
+        .P_USE_BLOCK_AER_FC         (P_USE_BLOCK_AER_FC),
+        .P_USE_EVENT_DRIVEN_CONV    (P_USE_EVENT_DRIVEN_CONV)
     ) u_snn_top_inst (
         .clk                          (tb_clk),
         .rst_n                        (tb_rst_n),
@@ -154,27 +187,58 @@ module snn_top_tb;
             stat_block32_seen <= {LP_BLOCK32_COUNT{1'b0}};
             stat_block64_seen <= {LP_BLOCK64_COUNT{1'b0}};
             stat_group4_seen <= {LP_WEIGHT_GROUP4_COUNT{1'b0}};
+            stat_actual_block32_seen <= {LP_BLOCK32_COUNT{1'b0}};
+            stat_recent_block_valid <= 8'd0;
+            for (stat_idx = 0; stat_idx < 8; stat_idx = stat_idx + 1) begin
+                stat_recent_block_id[stat_idx] <= 6'd0;
+            end
             stat_aer_events_total <= 0;
             stat_block16_packets_total <= 0;
             stat_block32_packets_total <= 0;
             stat_block64_packets_total <= 0;
             stat_group4_reads_total <= 0;
+            stat_actual_block32_packets_total <= 0;
+            stat_actual_block32_repeated_total <= 0;
+            stat_actual_block32_popcount_total <= 0;
+            stat_actual_block32_single_bit_total <= 0;
+            stat_actual_block32_recent2_hit_total <= 0;
+            stat_actual_block32_recent4_hit_total <= 0;
+            stat_actual_block32_recent8_hit_total <= 0;
             stat_aer_events_last <= 0;
             stat_block16_packets_last <= 0;
             stat_block32_packets_last <= 0;
             stat_block64_packets_last <= 0;
             stat_group4_reads_last <= 0;
+            stat_actual_block32_packets_last <= 0;
+            stat_actual_block32_repeated_last <= 0;
+            stat_actual_block32_popcount_last <= 0;
+            stat_actual_block32_single_bit_last <= 0;
+            stat_actual_block32_recent2_hit_last <= 0;
+            stat_actual_block32_recent4_hit_last <= 0;
+            stat_actual_block32_recent8_hit_last <= 0;
         end else begin
             if (u_snn_top_inst.conv_lif_actual_enable_r) begin
                 stat_block16_seen <= {LP_BLOCK16_COUNT{1'b0}};
                 stat_block32_seen <= {LP_BLOCK32_COUNT{1'b0}};
                 stat_block64_seen <= {LP_BLOCK64_COUNT{1'b0}};
                 stat_group4_seen <= {LP_WEIGHT_GROUP4_COUNT{1'b0}};
+                stat_actual_block32_seen <= {LP_BLOCK32_COUNT{1'b0}};
+                stat_recent_block_valid <= 8'd0;
+                for (stat_idx = 0; stat_idx < 8; stat_idx = stat_idx + 1) begin
+                    stat_recent_block_id[stat_idx] <= 6'd0;
+                end
                 stat_aer_events_last <= 0;
                 stat_block16_packets_last <= 0;
                 stat_block32_packets_last <= 0;
                 stat_block64_packets_last <= 0;
                 stat_group4_reads_last <= 0;
+                stat_actual_block32_packets_last <= 0;
+                stat_actual_block32_repeated_last <= 0;
+                stat_actual_block32_popcount_last <= 0;
+                stat_actual_block32_single_bit_last <= 0;
+                stat_actual_block32_recent2_hit_last <= 0;
+                stat_actual_block32_recent4_hit_last <= 0;
+                stat_actual_block32_recent8_hit_last <= 0;
             end
 
             if (u_snn_top_inst.perf_aer_event_accept_w) begin
@@ -204,6 +268,60 @@ module snn_top_tb;
                     stat_group4_reads_last <= stat_group4_reads_last + 1;
                 end
             end
+
+            if (u_snn_top_inst.block_packer_block_valid && u_snn_top_inst.block_packer_block_ready) begin
+                stat_actual_block32_packets_total <= stat_actual_block32_packets_total + 1;
+                stat_actual_block32_packets_last <= stat_actual_block32_packets_last + 1;
+                stat_actual_block32_popcount_total <= stat_actual_block32_popcount_total +
+                    tb_popcount32(u_snn_top_inst.block_packer_block_mask);
+                stat_actual_block32_popcount_last <= stat_actual_block32_popcount_last +
+                    tb_popcount32(u_snn_top_inst.block_packer_block_mask);
+
+                if (tb_popcount32(u_snn_top_inst.block_packer_block_mask) == 1) begin
+                    stat_actual_block32_single_bit_total <= stat_actual_block32_single_bit_total + 1;
+                    stat_actual_block32_single_bit_last <= stat_actual_block32_single_bit_last + 1;
+                end
+
+                if (stat_actual_block32_seen[u_snn_top_inst.block_packer_block_id]) begin
+                    stat_actual_block32_repeated_total <= stat_actual_block32_repeated_total + 1;
+                    stat_actual_block32_repeated_last <= stat_actual_block32_repeated_last + 1;
+                end
+                stat_actual_block32_seen[u_snn_top_inst.block_packer_block_id] <= 1'b1;
+
+                if ((stat_recent_block_valid[0] && stat_recent_block_id[0] == u_snn_top_inst.block_packer_block_id) ||
+                    (stat_recent_block_valid[1] && stat_recent_block_id[1] == u_snn_top_inst.block_packer_block_id)) begin
+                    stat_actual_block32_recent2_hit_total <= stat_actual_block32_recent2_hit_total + 1;
+                    stat_actual_block32_recent2_hit_last <= stat_actual_block32_recent2_hit_last + 1;
+                end
+                if ((stat_recent_block_valid[0] && stat_recent_block_id[0] == u_snn_top_inst.block_packer_block_id) ||
+                    (stat_recent_block_valid[1] && stat_recent_block_id[1] == u_snn_top_inst.block_packer_block_id) ||
+                    (stat_recent_block_valid[2] && stat_recent_block_id[2] == u_snn_top_inst.block_packer_block_id) ||
+                    (stat_recent_block_valid[3] && stat_recent_block_id[3] == u_snn_top_inst.block_packer_block_id)) begin
+                    stat_actual_block32_recent4_hit_total <= stat_actual_block32_recent4_hit_total + 1;
+                    stat_actual_block32_recent4_hit_last <= stat_actual_block32_recent4_hit_last + 1;
+                end
+                if ((stat_recent_block_valid[0] && stat_recent_block_id[0] == u_snn_top_inst.block_packer_block_id) ||
+                    (stat_recent_block_valid[1] && stat_recent_block_id[1] == u_snn_top_inst.block_packer_block_id) ||
+                    (stat_recent_block_valid[2] && stat_recent_block_id[2] == u_snn_top_inst.block_packer_block_id) ||
+                    (stat_recent_block_valid[3] && stat_recent_block_id[3] == u_snn_top_inst.block_packer_block_id) ||
+                    (stat_recent_block_valid[4] && stat_recent_block_id[4] == u_snn_top_inst.block_packer_block_id) ||
+                    (stat_recent_block_valid[5] && stat_recent_block_id[5] == u_snn_top_inst.block_packer_block_id) ||
+                    (stat_recent_block_valid[6] && stat_recent_block_id[6] == u_snn_top_inst.block_packer_block_id) ||
+                    (stat_recent_block_valid[7] && stat_recent_block_id[7] == u_snn_top_inst.block_packer_block_id)) begin
+                    stat_actual_block32_recent8_hit_total <= stat_actual_block32_recent8_hit_total + 1;
+                    stat_actual_block32_recent8_hit_last <= stat_actual_block32_recent8_hit_last + 1;
+                end
+
+                stat_recent_block_id[7] <= stat_recent_block_id[6];
+                stat_recent_block_id[6] <= stat_recent_block_id[5];
+                stat_recent_block_id[5] <= stat_recent_block_id[4];
+                stat_recent_block_id[4] <= stat_recent_block_id[3];
+                stat_recent_block_id[3] <= stat_recent_block_id[2];
+                stat_recent_block_id[2] <= stat_recent_block_id[1];
+                stat_recent_block_id[1] <= stat_recent_block_id[0];
+                stat_recent_block_id[0] <= u_snn_top_inst.block_packer_block_id;
+                stat_recent_block_valid <= {stat_recent_block_valid[6:0], 1'b1};
+            end
         end
     end
 
@@ -214,6 +332,11 @@ module snn_top_tb;
             $display("[%0t ns] SIM_INFO: AER FC mode = BLOCK-MASK.", $time);
         end else begin
             $display("[%0t ns] SIM_INFO: AER FC mode = DENSE.", $time);
+        end
+        if (P_USE_EVENT_DRIVEN_CONV) begin
+            $display("[%0t ns] SIM_INFO: conv mode = EVENT-DRIVEN.", $time);
+        end else begin
+            $display("[%0t ns] SIM_INFO: conv mode = SCAN-OUTPUT.", $time);
         end
         if (P_USE_MULTICORE_CONV_LIF) begin
             $display("[%0t ns] SIM_INFO: conv_lif mode = 4-CORE SPARSE SKIP.", $time);
@@ -255,21 +378,45 @@ module snn_top_tb;
 
         if (P_USE_MULTICORE_CONV_LIF) begin
             if (P_USE_BLOCK_AER_FC) begin
-                $display("SIM_INFO: mode_summary conv_lif=4-core_sparse, aer_fc=block_mask, current_buffer=pingpong");
+                if (P_USE_EVENT_DRIVEN_CONV) begin
+                    $display("SIM_INFO: mode_summary conv=event_driven, conv_lif=4-core_sparse, aer_fc=block_mask, current_buffer=pingpong");
+                end else begin
+                    $display("SIM_INFO: mode_summary conv=scan_output, conv_lif=4-core_sparse, aer_fc=block_mask, current_buffer=pingpong");
+                end
             end else begin
-                $display("SIM_INFO: mode_summary conv_lif=4-core_sparse, aer_fc=dense_aer, current_buffer=pingpong");
+                if (P_USE_EVENT_DRIVEN_CONV) begin
+                    $display("SIM_INFO: mode_summary conv=event_driven, conv_lif=4-core_sparse, aer_fc=dense_aer, current_buffer=pingpong");
+                end else begin
+                    $display("SIM_INFO: mode_summary conv=scan_output, conv_lif=4-core_sparse, aer_fc=dense_aer, current_buffer=pingpong");
+                end
             end
         end else if (P_USE_SPARSE_CONV_LIF) begin
             if (P_USE_BLOCK_AER_FC) begin
-                $display("SIM_INFO: mode_summary conv_lif=single_sparse, aer_fc=block_mask, current_buffer=pingpong");
+                if (P_USE_EVENT_DRIVEN_CONV) begin
+                    $display("SIM_INFO: mode_summary conv=event_driven, conv_lif=single_sparse, aer_fc=block_mask, current_buffer=pingpong");
+                end else begin
+                    $display("SIM_INFO: mode_summary conv=scan_output, conv_lif=single_sparse, aer_fc=block_mask, current_buffer=pingpong");
+                end
             end else begin
-                $display("SIM_INFO: mode_summary conv_lif=single_sparse, aer_fc=dense_aer, current_buffer=pingpong");
+                if (P_USE_EVENT_DRIVEN_CONV) begin
+                    $display("SIM_INFO: mode_summary conv=event_driven, conv_lif=single_sparse, aer_fc=dense_aer, current_buffer=pingpong");
+                end else begin
+                    $display("SIM_INFO: mode_summary conv=scan_output, conv_lif=single_sparse, aer_fc=dense_aer, current_buffer=pingpong");
+                end
             end
         end else begin
             if (P_USE_BLOCK_AER_FC) begin
-                $display("SIM_INFO: mode_summary conv_lif=dense, aer_fc=block_mask, current_buffer=pingpong");
+                if (P_USE_EVENT_DRIVEN_CONV) begin
+                    $display("SIM_INFO: mode_summary conv=event_driven, conv_lif=dense, aer_fc=block_mask, current_buffer=pingpong");
+                end else begin
+                    $display("SIM_INFO: mode_summary conv=scan_output, conv_lif=dense, aer_fc=block_mask, current_buffer=pingpong");
+                end
             end else begin
-                $display("SIM_INFO: mode_summary conv_lif=dense, aer_fc=dense_aer, current_buffer=pingpong");
+                if (P_USE_EVENT_DRIVEN_CONV) begin
+                    $display("SIM_INFO: mode_summary conv=event_driven, conv_lif=dense, aer_fc=dense_aer, current_buffer=pingpong");
+                end else begin
+                    $display("SIM_INFO: mode_summary conv=scan_output, conv_lif=dense, aer_fc=dense_aer, current_buffer=pingpong");
+                end
             end
         end
 
@@ -293,6 +440,21 @@ module snn_top_tb;
                  tb_perf_last_conv_lif_cycles,
                  tb_perf_total_conv_lif_cycles,
                  tb_perf_last_aer_fc_cycles);
+        $display("SIM_INFO: fifo_status core_max=%0d, core_overflow=%b, aer_overflow=%b, block_overflow=%b, core_depth=%0d, aer_depth=%0d, block_depth=%0d",
+                 u_snn_top_inst.o_perf_last_core_fifo_max_count,
+                 u_snn_top_inst.conv_lif_core_fifo_overflow,
+                 u_snn_top_inst.fifo_overflow,
+                 u_snn_top_inst.block_fifo_overflow,
+                 u_snn_top_inst.LP_CORE_EVENT_FIFO_DEPTH,
+                 u_snn_top_inst.LP_AER_EVENT_FIFO_DEPTH,
+                 u_snn_top_inst.LP_BLOCK_EVENT_FIFO_DEPTH);
+        if (P_USE_EVENT_DRIVEN_CONV) begin
+            $display("SIM_INFO: event_conv_writeback retired=%0d, writes=%0d, skipped_clean=%0d, priority_search=%0d",
+                     u_snn_top_inst.u_conv_layer_parallel.o_total_retired_pixels,
+                     u_snn_top_inst.u_conv_layer_parallel.o_total_current_ram_writes,
+                     u_snn_top_inst.u_conv_layer_parallel.o_skipped_clean_retirements,
+                     u_snn_top_inst.u_conv_layer_parallel.o_priority_search_count);
+        end
         $display("SIM_INFO: block_mask_aer events_total=%0d, pkt16=%0d, pkt32=%0d, pkt64=%0d",
                  stat_aer_events_total,
                  stat_block16_packets_total,
@@ -315,6 +477,19 @@ module snn_top_tb;
         if (stat_aer_events_total != 0) begin
             $display("SIM_INFO: block_mask_aer weight_read_reduce group4=%0d%%",
                      100 - (stat_group4_reads_total * 100) / stat_aer_events_total);
+        end
+        $display("SIM_INFO: block_mask_aer actual_pkt32 total=%0d, last=%0d, repeated_total=%0d, repeated_last=%0d",
+                 stat_actual_block32_packets_total,
+                 stat_actual_block32_packets_last,
+                 stat_actual_block32_repeated_total,
+                 stat_actual_block32_repeated_last);
+        if (stat_actual_block32_packets_total != 0) begin
+            $display("SIM_INFO: block_mask_aer actual_pkt32 avg_popcount_x100=%0d, single_bit=%0d, recent_hit2=%0d, recent_hit4=%0d, recent_hit8=%0d",
+                     (stat_actual_block32_popcount_total * 100) / stat_actual_block32_packets_total,
+                     stat_actual_block32_single_bit_total,
+                     stat_actual_block32_recent2_hit_total,
+                     stat_actual_block32_recent4_hit_total,
+                     stat_actual_block32_recent8_hit_total);
         end
         
         repeat(10) @(posedge tb_clk);

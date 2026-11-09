@@ -1,0 +1,3 @@
+localparam integer CASE_COUNT = 99;
+localparam [575:0] WEIGHTS_ON = 576'hff69ff94ffbfffea00150040006b009600c1ff7cffa7ffd2fffd00280053007e00a900d4ff8fffbaffe50010003b0066009100bc00e7ffa2ffcdfff80023004e007900a400cf00fa;
+localparam [575:0] WEIGHTS_OFF = 576'h0097006c00410016ffebffc0ff95ff6aff3f00840059002e0003ffd8ffadff82ff57ff2c00710046001bfff0ffc5ff9aff6fff44ff19005e00330008ffddffb2ff87ff5cff31ff06;
